@@ -241,16 +241,19 @@ PR 描述必须含（见 `.github/PULL_REQUEST_TEMPLATE.md`）：实现内容、
 ### PR 流程
 ```
 开发 agent 完成 -> push feat/story-N -> gh pr create
-  -> GitHub Actions CI 自动跑（ruff + pytest + alembic）
-  -> 主会话派 code-reviewer agent 审查（gh pr review）
-  -> 有 P0/P1 -> 转回开发 agent 修 -> push（CI 重跑）
-  -> CI 绿 + review 通过 -> 主会话 gh pr merge --squash --delete-branch
+  -> GitHub Actions CI 自动跑（ruff + pytest + alembic）【硬门禁】
+  -> 主会话派 code-reviewer agent 审查 -> 产出报告（gh pr review --comment）【软门禁】
+  -> 报告有 P0/P1 -> 转回开发 agent 修 -> push（CI 重跑，review 重审）
+  -> CI 绿 + review 无 P0/P1 -> 主会话 gh pr merge --squash --delete-branch
   -> PR 写 Fixes #N 则对应 issue 自动关闭
   -> 更新 PROGRESS.md
 ```
 
-### 分支保护
-main 分支已配置保护：要求 CI 绿 + 至少 1 个 review 才能合并，只允许 squash 合并。
+### 分支保护（已配置）
+- **CI 硬门禁**：`Service (lint+test+migrate)` 和 `H5 (build)` 必须全绿才能合并。
+- **strict 模式**：分支必须 rebase 到最新 main。
+- **线性历史**：只允许 squash 合并（一个 Story = main 上一条提交）。
+- **不强制 GitHub approval**：单人 + 智能体场景，PR 作者即代码作者，GitHub 不允许作者批准自己的 PR。故 review 由 code-reviewer agent 以**报告形式**（`gh pr review --comment`）提供，主会话基于报告决定是否合并（软门禁，靠纪律）。CI 是唯一的平台级硬门禁。
 
 ### issue 闭环
 issue 必须**自包含**（完整复现步骤 + 期望 + 实际），因为修复 agent 无上下文记忆。
