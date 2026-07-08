@@ -1,0 +1,31 @@
+# 目标管理系统 - 本地编排（Service + Redis）
+# 用法：docker compose up -d   （需先在根目录 .env 放飞书凭据，或留空）
+services:
+  service:
+    build: ./service
+    ports:
+      - "8001:8001"  # REST API + Webhook（单端口，两个前缀）
+    volumes:
+      - ./service/data:/app/data        # SQLite 主库
+      - ./vault:/app/vault              # Obsidian daily.md/weekly.md
+      - ./workspaces:/app/workspaces    # 项目空间
+    environment:
+      - DATABASE_URL=sqlite:///app/data/pm.db
+      - REDIS_URL=redis://redis:6379/0
+      - OPENCODE_BASE_URL=http://host.docker.internal:8080
+      - AGENT_PORT_RANGE=10000-20000
+      - API_PORT=8001
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - H5_BASE_URL=${H5_BASE_URL:-http://localhost:5173}
+      - SUPERVISOR_ENABLED=true
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
