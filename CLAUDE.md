@@ -58,7 +58,7 @@
 - 主键：TEXT，UUID（`uuid4`）。
 - 时间：UTC 存储。
 - model 范本见 `app/models/goal.py`（Mapped 类型 + CheckConstraint + server_default）。
-- **每实现一个 model，在 `app/models/__init__.py` import 它**（Alembic autogenerate 才看得到）。
+- **新增 model：在 `app/models/` 下新建 `*.py` 即可**，`__init__.py` 自动发现（无需手动加 import，消除多 agent 并行编辑冲突）。Alembic autogenerate 会自动检测到。
 
 ### 风格
 - ruff（line-length 100，规则 E/F/I/UP/B）。提交前 `make lint`、`make format`。
@@ -70,14 +70,14 @@
 
 ### 每 Story 步骤
 1. 读对应文档章节（见下方对照表）
-2. 写/改 `app/models/*.py`，在 `__init__.py` import
+2. 写/改 `app/models/*.py`（新文件自动被 `__init__.py` 发现，无需改它）
 3. `make migrate MSG="..."` 生成迁移，**检查迁移文件**无误
 4. `make upgrade` 应用
 5. 写 Repository（如需）
-6. 写 AppSvc（业务 + 事务 + 级联）
-7. 写 `app/api/v1/*.py` 路由
+6. 写 AppSvc（业务 + 事务 + 级联；复用 `app/core/` 现有件）
+7. 写 `app/api/v1/*.py` 路由（在 `router.py` 注册）
 8. 写测试（`tests/unit` + `tests/integration`）
-9. `make test` 全绿 → 进下一个 Story
+9. `make test` + `make lint` 全绿后提交（提交规范见第十节）
 
 ### Story 顺序与文档对照
 | 顺序 | Story | 涉及表/组件 | 文档 |
@@ -143,3 +143,120 @@ H5 内：`npm run dev`、`npm run build`
 - 阶段：未开始/进行中/已完成/已暂停；进行中↔已暂停、已完成→进行中(revert,reason必填)
 - 任务：待执行/已完成/已暂停；待执行↔已暂停、已完成→待执行(revert,reason必填)
 - 暂停/回退必填 reason，恢复不填 reason
+
+
+---
+
+## 十、会话恢复协议（agent 重启必做）
+
+agent 上下文会被压缩或丢失，**不依赖对话记忆恢复进度**。新 session 接手时按以下顺序恢复，git/代码是真相源，PROGRESS.md 是缓存：
+
+1. **读本文件**（CLAUDE.md）：了解规范、铁律、Story 顺序。
+2. **看进度缓存**：读 `PROGRESS.md` 状态表（可能滞后，下一步交叉验证）。
+3. **看 git 真相**：
+   - `git log --oneline origin/main | grep -oE 'Story [0-9A-Za-z]+'`：已合并的 Story
+   - `git branch -r | grep feat/story`：进行中的分支
+4. **看 PR/issue**：
+   - `gh pr list --state open --json number,title,headRefName`：审查中的 PR
+   - `gh issue list --state open`：未修的 bug
+5. **看代码级进度**：`app/models/__init__.py` 的 ✅/⬜ 进度表（最细）
+6. **交叉比对**：若 PROGRESS.md 与 git 矛盾，以 git 为准，顺手更新 PROGRESS.md。
+7. **定位下一步**：第一个"未合并"且"其依赖已全部合并到 main"的 Story = 下一个要做的。
+
+恢复命令一键脚本：
+```bash
+echo "=== 已合并 Story ===" && git log --oneline origin/main | grep -oE 'Story [0-9A-Za-z]+' | sort -u
+echo "=== 进行中分支 ===" && git branch -r | grep feat/story
+echo "=== 开放 PR ===" && gh pr list --state open
+echo "=== 开放 issue ===" && gh issue list
+```
+
+## 十一、复用件清单 + 先搜后建纪律
+
+### 必须复用、禁止重写的公共件
+| 件 | 位置 | 用途 | 被哪些 Story 复用 |
+|----|------|------|------------------|
+| 即时级联引擎 | `app/core/cascade.py` | 任务/阶段状态变更事务内向上推导 | S5(回退)、S9(看板)、S8(监听事件) |
+| 状态机校验 | `app/core/state_machine.py` | 状态流转合法性 + reason 必填 | S5、S9 |
+| 状态变更审计 | `app/core/audit.py` | 写 status_change_log | S5、S8、S9 |
+| 飞书客户端 | `app/clients/feishu.py` | 发消息/更新卡片/发文件 | 所有推卡片的 Story |
+| OpenCode 客户端 | `app/clients/opencode.py` | 下发任务到 opencode serve | S4A |
+| Obsidian 读写 | `app/clients/fileio.py` | daily.md/weekly.md 快照 | S5、S6 |
+| 事件总线 | `app/supervisor/event_bus.py` | 状态变更事件分发 | S8 实现，S1-S7 调 emit() |
+
+用法：`from app.core import cascade, state_machine, audit`。
+
+### 事件总线接口先行
+S8 才实现 EventBus，但 S1 起就会发"阶段完成"事件。**S1 建一个 `emit(event)` 桩**（先 no-op 只打日志），S1-S7 都调 `emit()`，S8 把内部实现换成真分发。接口不变，S8 合并后之前所有事件自动接上。
+
+### 先搜后建（硬规则）
+**实现任何新逻辑前，先 grep 现有代码**：
+```bash
+grep -rn "关键词" app/core/ app/clients/ app/services/
+```
+有现成实现则调用，没有才新建。**重复造轮子是 P1 issue**（code-reviewer 会查）。
+
+## 十二、协作规范（多 agent + GitHub）
+
+### 角色分工
+- **主会话（你）**：调度中心。定位下一个 Story、派发子 agent、合并 PR、更新 PROGRESS.md。**主工作区只做合并，不写业务代码**。
+- **开发子 agent**：在 worktree 里实现一个 Story，写完+测试+开 PR 后汇报。
+- **code-reviewer agent**（`.claude/agents/code-reviewer.md`）：审 PR，只报不改。通用方法论 + 读 CLAUDE.md 注入本项目铁律。
+
+### worktree + 分支（避免分支互写）
+- 每个 Story 一个 worktree + 一个分支，分支名 `feat/story-N`（如 `feat/story-2`）。
+- 派发子 agent 时设 `isolation: "worktree"`，自动在 `.claude/worktrees/storyN/` 建隔离目录。
+- **worktree 生命周期 = Story 生命周期**：合并后立即删 worktree（`git worktree remove`）+ 删分支。
+- 子 agent 开工前必做：`git fetch && git rebase origin/main`（基要最新）。
+- 子 agent 不自行合并，合并是主会话职责。
+
+### 提交规范（Conventional Commits，来源 conventionalcommits.org）
+格式：`<type>(<scope>): <subject>`
+- type：feat / fix / refactor / test / docs / chore / perf
+- scope：模块名（plan/daily/task/board 等）
+- **PR title 必须含 Story 号**：如 `feat(plan): Story1 目标规划与确认`
+
+commit 示例：
+```
+feat(plan): Story1 目标规划与确认
+fix(daily): executor 推断漏处理 learning 类型
+test(cascade): 补充回退级联回归测试
+```
+
+PR 描述必须含（见 `.github/PULL_REQUEST_TEMPLATE.md`）：实现内容、关联 Story、依赖、Fixes #issue、测试结果、铁律自检。**合并用 squash**（一个 Story = main 上一条提交，可数）。
+
+### 合并顺序（严格按依赖图）
+合并顺序 = 依赖顺序（见第五节 Story 表）。同一并行窗口（如 {S2‖S7}）必须**一个合完、main 更新后，另一个 rebase 再合**，不能同时合。
+
+### 迁移合并纪律（alembic 多 head 处理）
+并行 Story 各自生成迁移文件，合并到 main 时**按顺序串行合**：
+1. 合第一个 Story：正常 `gh pr merge --squash`。
+2. 合第二个 Story 前：该分支 `git rebase origin/main`。
+3. 若 alembic 报 "Multiple heads"（两个迁移都指向旧 head）：
+   - 方案 A（推荐）：`uv run alembic merge -m "merge storyX storyY" <revX> <revY>` 生成合流迁移。
+   - 方案 B：手动把后者的 `down_revision` 改指新 head。
+4. `uv run alembic upgrade head` 验证无误后，才合并。
+5. **迁移合并由主会话执行，不让子 agent 自己合。**
+
+### PR 流程
+```
+开发 agent 完成 -> push feat/story-N -> gh pr create
+  -> GitHub Actions CI 自动跑（ruff + pytest + alembic）
+  -> 主会话派 code-reviewer agent 审查（gh pr review）
+  -> 有 P0/P1 -> 转回开发 agent 修 -> push（CI 重跑）
+  -> CI 绿 + review 通过 -> 主会话 gh pr merge --squash --delete-branch
+  -> PR 写 Fixes #N 则对应 issue 自动关闭
+  -> 更新 PROGRESS.md
+```
+
+### 分支保护
+main 分支已配置保护：要求 CI 绿 + 至少 1 个 review 才能合并，只允许 squash 合并。
+
+### issue 闭环
+issue 必须**自包含**（完整复现步骤 + 期望 + 实际），因为修复 agent 无上下文记忆。
+```
+提 issue（关联 Story + 严重度）-> 分配给该 Story 的负责 agent
+  -> agent 读 issue 复现 -> 修 -> 加回归测试 -> 开 PR（Fixes #N）
+  -> review 复测 -> 通过合并 -> issue 自动关闭 / 不通过 gh issue reopen
+```
+主会话启动时一次性 `gh issue list` + `gh pr list` 同步状态，**无需定时扫描**。

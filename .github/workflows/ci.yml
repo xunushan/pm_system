@@ -1,0 +1,62 @@
+name: CI
+
+# 触发：向 main 开 PR、push 到 main
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  service:
+    name: Service (lint + test + migrate)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: service
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # 安装 uv（官方 action，来源：docs.astral.sh/uv/guides/integration/docker）
+      - uses: astral-sh/setup-uv@v3
+
+      # 装依赖（用 lock 文件，可复现）
+      - run: uv sync --frozen
+
+      # 静态检查
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+      # 测试（内存 SQLite，见 tests/conftest.py）
+      - run: uv run pytest -v
+
+      # 验证迁移可应用（SQLite，无外部依赖）
+      - run: uv run alembic upgrade head
+
+  h5:
+    name: H5 (build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: h5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: h5/package-lock.json
+
+      # package-lock.json 不存在则先生成；存在则 npm ci
+      - run: |
+          if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+      # 验证能构建（TS 类型检查 + 打包）
+      - run: npm run build

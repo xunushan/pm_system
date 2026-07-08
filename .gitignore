@@ -30,3 +30,4 @@ workspaces/
 .DS_Store
 .vscode/
 .idea/
+.claude/worktrees/

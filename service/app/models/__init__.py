@@ -1,10 +1,14 @@
-"""ORM model 汇总。
+"""ORM model 汇总（自动发现）。
 
-Alembic autogenerate 通过 `Base.metadata` 检测表结构——
-**每实现一个表，在此 import 其 model 类**，否则 autogenerate 看不到它。
+Alembic autogenerate 通过 `Base.metadata` 检测表结构。
+model 类只有被 import 才会注册到 metadata。
+本文件自动导入目录下所有 model 模块，无需手动添加 import，
+**消除多 agent 并行开发时编辑此文件的冲突**。
 
-实现进度（按 Story 推进，逐个添加 import）：
-  - goals               ✅ Story1  (app.models.goal)
+新增 model：在 app/models/ 下新建 *.py 即可，无需改动本文件。
+
+实现进度（按 Story 推进）：
+  - goals               ✅ Story1  (app/models/goal.py)
   - themes              ⬜ Story1
   - phases              ⬜ Story1
   - tasks               ⬜ Story1
@@ -17,9 +21,21 @@ Alembic autogenerate 通过 `Base.metadata` 检测表结构——
   - subtasks            ⬜ Story4B
   - status_change_log   ⬜ Story5
   - weekly_records      ⬜ Story6
-  - subtask_templates    ⬜ Story7
+  - subtask_templates   ⬜ Story7
 """
 
-from app.models.goal import Goal
+from importlib import import_module
+from pathlib import Path
 
-__all__ = ["Goal"]
+from app.db.base import Base  # noqa: F401  re-export for convenience
+
+# 自动导入所有 model 模块，注册到 Base.metadata。
+# 注意：必须用 .parent.glob —— __file__ 是文件，直接对文件调 glob 返回空。
+_MODELS_DIR = Path(__file__).resolve().parent
+for _f in _MODELS_DIR.glob("*.py"):
+    if _f.stem != "__init__":
+        import_module(f"app.models.{_f.stem}")
+
+__all__ = ["Base"]
+
+__all__ = ["Base"]

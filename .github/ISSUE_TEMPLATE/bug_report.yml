@@ -1,0 +1,65 @@
+name: Bug 报告
+description: 报告代码缺陷或行为异常
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量自包含地描述问题--修复的 agent 可能没有上下文记忆，
+        它只能靠这份 issue 复现和理解问题。
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重度
+      description: P0 阻塞关键流程；P1 严重但可绕过；P2 一般；P3 轻微
+      options:
+        - P0 阻塞
+        - P1 严重
+        - P2 一般
+        - P3 轻微
+    validations:
+      required: true
+
+  - type: input
+    id: story
+    attributes:
+      label: 关联 Story
+      description: 问题出在哪个 Story 的代码里（如 S3）
+      placeholder: "S3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 一步步写清楚，让 agent 能照着复现
+      placeholder: |
+        1. 调用 POST /api/v1/daily/confirm，body 为 {...}
+        2. ...
+        3. 观察到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 含报错信息/堆栈（如有）
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: 代码位置
+      description: 若已知，填 file:line
+      placeholder: "app/services/daily_app_svc.py:42"
