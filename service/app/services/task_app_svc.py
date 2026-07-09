@@ -186,10 +186,16 @@ class TaskAppSvc:
     # ---- subtask CRUD（POST/GET/PATCH /subtasks）----
 
     def create_subtask(self, req: SubtaskCreateRequest) -> SubtaskData:
-        """创建子任务（前置/后置，由 pm-subtask 生成后调用）。"""
+        """创建子任务（前置/后置，由 pm-subtask 生成后调用）。
+
+        前置/后置只服务人执行任务（doc/02 2.5）：校验 task.executor='human'，
+        与 post_confirm 的约束一致，防止绕过 post_confirm 直连此端点。
+        """
         task = self.task_repo.get(req.task_id)
         if task is None:
             raise NotFoundError(f"任务不存在: {req.task_id}")
+        if task.executor != "human":
+            raise BadRequestError(f"子任务只服务人执行任务，当前 executor: {task.executor!r}")
         if req.type not in ("前置", "后置"):
             raise BadRequestError(f"子任务类型非法: {req.type!r}（仅 前置/后置）")
         sort_order = self.subtask_repo.next_sort_order(req.task_id)
@@ -213,13 +219,21 @@ class TaskAppSvc:
         return self._to_subtask_data(sub)
 
     def patch_subtask(self, subtask_id: str, req: SubtaskPatchRequest) -> SubtaskData:
-        """更新子任务状态（异步执行完成后回调）。"""
+        """更新子任务状态（异步执行完成后回调）。
+
+        状态流转校验（最小防御，doc 未为 subtask 定义正式状态机）：
+          - 正向流转允许：待执行->进行中->已完成 / ->失败
+          - 禁止逆向：已完成/失败/进行中 -> 待执行（防止数据不一致）
+        """
         sub = self.subtask_repo.get(subtask_id)
         if sub is None:
             raise NotFoundError(f"子任务不存在: {subtask_id}")
         if req.status is not None:
             if req.status not in ("待执行", "进行中", "已完成", "失败"):
                 raise BadRequestError(f"子任务状态非法: {req.status!r}")
+            # 禁止逆向流转到待执行（已完成/失败/进行中 -> 待执行）
+            if req.status == "待执行" and sub.status in ("进行中", "已完成", "失败"):
+                raise BadRequestError(f"子任务不可从 {sub.status!r} 回退到 '待执行'")
             if req.status == "已完成":
                 sub.completed_at = now_utc_naive()
             sub.status = req.status

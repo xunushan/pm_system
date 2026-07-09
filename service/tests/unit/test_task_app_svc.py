@@ -226,6 +226,15 @@ def test_create_subtask_invalid_type(db_session):
         )
 
 
+def test_create_subtask_non_human_executor_rejects(db_session):
+    """create_subtask：executor 非 human -> BadRequestError（前置/后置只服务人执行任务）。"""
+    goal, themes, phases, task = _setup_active_task(db_session, executor="agent")
+    with pytest.raises(BadRequestError):
+        TaskAppSvc(db_session).create_subtask(
+            SubtaskCreateRequest(task_id=task.id, name="x", type="前置")
+        )
+
+
 def test_create_subtask_task_not_found(db_session):
     with pytest.raises(NotFoundError):
         TaskAppSvc(db_session).create_subtask(
@@ -278,3 +287,65 @@ def test_patch_subtask_invalid_status(db_session):
 def test_patch_subtask_not_found(db_session):
     with pytest.raises(NotFoundError):
         TaskAppSvc(db_session).patch_subtask("no-such-id", SubtaskPatchRequest(status="已完成"))
+
+
+# ===== patch_subtask 状态流转校验（P2-2）=====
+
+
+def test_patch_subtask_forward_transitions_ok(db_session):
+    """patch_subtask：正向流转待执行->进行中->已完成 允许。"""
+    goal, themes, phases, task = _setup_active_task(db_session)
+    svc = TaskAppSvc(db_session)
+    created = svc.create_subtask(SubtaskCreateRequest(task_id=task.id, name="x", type="前置"))
+
+    # 待执行 -> 进行中
+    data = svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="进行中"))
+    assert data.status == "进行中"
+
+    # 进行中 -> 已完成
+    data = svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="已完成"))
+    assert data.status == "已完成"
+    assert data.completed_at is not None
+
+
+def test_patch_subtask_to_failed_ok(db_session):
+    """patch_subtask：待执行->失败 / 进行中->失败 允许。"""
+    goal, themes, phases, task = _setup_active_task(db_session)
+    svc = TaskAppSvc(db_session)
+    created = svc.create_subtask(SubtaskCreateRequest(task_id=task.id, name="x", type="前置"))
+
+    data = svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="失败"))
+    assert data.status == "失败"
+
+
+def test_patch_subtask_completed_to_pending_rejects(db_session):
+    """patch_subtask：已完成->待执行 逆向流转 -> BadRequestError。"""
+    goal, themes, phases, task = _setup_active_task(db_session)
+    svc = TaskAppSvc(db_session)
+    created = svc.create_subtask(SubtaskCreateRequest(task_id=task.id, name="x", type="前置"))
+    svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="已完成"))
+
+    with pytest.raises(BadRequestError):
+        svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="待执行"))
+
+
+def test_patch_subtask_failed_to_pending_rejects(db_session):
+    """patch_subtask：失败->待执行 逆向流转 -> BadRequestError。"""
+    goal, themes, phases, task = _setup_active_task(db_session)
+    svc = TaskAppSvc(db_session)
+    created = svc.create_subtask(SubtaskCreateRequest(task_id=task.id, name="x", type="前置"))
+    svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="失败"))
+
+    with pytest.raises(BadRequestError):
+        svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="待执行"))
+
+
+def test_patch_subtask_in_progress_to_pending_rejects(db_session):
+    """patch_subtask：进行中->待执行 逆向流转 -> BadRequestError。"""
+    goal, themes, phases, task = _setup_active_task(db_session)
+    svc = TaskAppSvc(db_session)
+    created = svc.create_subtask(SubtaskCreateRequest(task_id=task.id, name="x", type="前置"))
+    svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="进行中"))
+
+    with pytest.raises(BadRequestError):
+        svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="待执行"))
