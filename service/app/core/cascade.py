@@ -87,6 +87,95 @@ def cascade_revert(db: Session, task_id: str) -> dict:
     return result
 
 
+def cascade_revert_entity(db: Session, entity_type: str, entity_id: str) -> dict:
+    """回退级联通用入口（S9 board 用）：从任意 entity 起点向上回退已完成的上级。
+
+    与 cascade_revert(task_id) 的区别：
+      - cascade_revert 仅处理 task 起点（S5 用），task 自身的 status 已由调用方改好。
+      - 本函数支持 goal/theme/phase/task 全起点（S9 board 用），entity 自身的 status
+        已由 BoardAppSvc 直接回退（change_type='revert'），本函数只处理**向上级联**。
+
+    幂等：只动'已完成'的上级（进行中/未开始/已暂停均不动）。
+    不向下回退子级（最小回退原则，DB 唯一真相源；用户可单独回退子级）。
+    遇到第一个非'已完成'即停（与 cascade_revert 一致）。
+
+    Returns:
+        {phase_reverted, theme_reverted, goal_reverted,
+         phase_id, theme_id, goal_id}（ID 供 board 响应引用）
+    """
+    if entity_type == "task":
+        # task 起点委托给 S5 既有 cascade_revert（行为不变），补 ID 字段
+        result = cascade_revert(db, entity_id)
+        return _augment_revert_result(db, result, entity_type, entity_id)
+
+    result = {
+        "phase_reverted": False,
+        "theme_reverted": False,
+        "goal_reverted": False,
+        "phase_id": None,
+        "theme_id": None,
+        "goal_id": None,
+    }
+
+    if entity_type == "phase":
+        phase = db.get(Phase, entity_id)
+        if phase is None:
+            return result
+        # phase 自身已被 BoardAppSvc 回退，向上查 theme/goal
+        _revert_upward_from_theme(db, phase.theme_id, result)
+    elif entity_type == "theme":
+        theme = db.get(Theme, entity_id)
+        if theme is None:
+            return result
+        # theme 自身已被 BoardAppSvc 回退，向上查 goal
+        _revert_upward_from_goal(db, theme.goal_id, result)
+    elif entity_type == "goal":
+        # goal 无上级，仅自身回退（BoardAppSvc 已处理），无级联
+        pass
+
+    return result
+
+
+def _augment_revert_result(db: Session, result: dict, entity_type: str, entity_id: str) -> dict:
+    """给 cascade_revert 返回值补 phase_id/theme_id/goal_id（供 board 响应引用）。"""
+    task = db.get(Task, entity_id)
+    if task is not None:
+        phase = db.get(Phase, task.phase_id)
+        if phase is not None:
+            result["phase_id"] = phase.id
+            theme = db.get(Theme, phase.theme_id)
+            if theme is not None:
+                result["theme_id"] = theme.id
+                goal = db.get(Goal, theme.goal_id)
+                if goal is not None:
+                    result["goal_id"] = goal.id
+    return result
+
+
+def _revert_upward_from_theme(db: Session, theme_id: str, result: dict) -> None:
+    """从 theme 起点向上回退：theme 若'已完成'拉回'进行中'，再查 goal。"""
+    theme = db.get(Theme, theme_id)
+    if theme is None or theme.status != "已完成":
+        return
+    _revert_cascade_status(db, "theme", theme, "进行中")
+    emit({"type": "theme_reverted", "entity_id": theme.id})
+    result["theme_reverted"] = True
+    result["theme_id"] = theme.id
+
+    _revert_upward_from_goal(db, theme.goal_id, result)
+
+
+def _revert_upward_from_goal(db: Session, goal_id: str, result: dict) -> None:
+    """从 goal 起点向上回退：goal 若'已完成'拉回'进行中'（goal 无上级）。"""
+    goal = db.get(Goal, goal_id)
+    if goal is None or goal.status != "已完成":
+        return
+    _revert_cascade_status(db, "goal", goal, "进行中")
+    emit({"type": "goal_reverted", "entity_id": goal.id})
+    result["goal_reverted"] = True
+    result["goal_id"] = goal.id
+
+
 # ---- 激活级联（Story2）----
 
 

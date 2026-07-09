@@ -24,6 +24,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.schemas.board import TaskDeleteData
 from app.schemas.common import ApiResponse
 from app.schemas.task import (
     ConfirmCompleteData,
@@ -40,6 +41,7 @@ from app.schemas.task import (
     TaskPatchStatusData,
     TaskPatchStatusRequest,
 )
+from app.services.board_app_svc import BoardAppSvc
 from app.services.task_app_svc import TaskAppSvc
 
 router = APIRouter()
@@ -141,4 +143,18 @@ def patch_task_status(
         triggered_by=payload.triggered_by,
         completed_at=payload.completed_at,
     )
+    return ApiResponse(data=data)
+
+
+# ---- Story9: 物理删除任务 DELETE ----
+
+
+@router.delete("/{task_id}", response_model=ApiResponse[TaskDeleteData])
+def delete_task(task_id: str, db: DBSession) -> ApiResponse[TaskDeleteData]:
+    """物理删除任务（H5 页面操作，doc/04 line 534）。
+
+    删除关联记录（daily_tasks/subtasks/workspace_progress）后物理删除 task。
+    不触发完成级联（物理删除是结构调整，非完成动作）。
+    """
+    data = BoardAppSvc(db).delete_task(task_id)
     return ApiResponse(data=data)

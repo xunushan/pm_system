@@ -96,6 +96,103 @@ def test_resume_no_reason_required(entity, frm, to):
     validate_transition(entity, frm, to, reason=None)
 
 
+# ===== goal/theme pause/resume/revert（S9 board 扩展）=====
+
+
+@pytest.mark.parametrize(
+    ("entity", "frm", "to"),
+    [
+        ("goal", "进行中", "已暂停"),
+        ("theme", "进行中", "已暂停"),
+    ],
+)
+def test_goal_theme_pause_requires_reason(entity, frm, to):
+    """goal/theme pause 缺 reason -> ReasonRequiredError(code=1005)。"""
+    with pytest.raises(ReasonRequiredError) as exc_info:
+        validate_transition(entity, frm, to, reason=None)
+    assert exc_info.value.code == 1005
+
+
+@pytest.mark.parametrize(
+    ("entity", "frm", "to"),
+    [
+        ("goal", "进行中", "已暂停"),
+        ("theme", "进行中", "已暂停"),
+    ],
+)
+def test_goal_theme_pause_with_reason_valid(entity, frm, to):
+    """goal/theme pause 有 reason -> 合法。"""
+    validate_transition(entity, frm, to, reason="暂停原因")
+
+
+@pytest.mark.parametrize(
+    ("entity", "frm", "to"),
+    [
+        ("goal", "已完成", "进行中"),
+        ("theme", "已完成", "进行中"),
+    ],
+)
+def test_goal_theme_revert_requires_reason(entity, frm, to):
+    """goal/theme revert 缺 reason -> ReasonRequiredError(code=1005)。"""
+    with pytest.raises(ReasonRequiredError) as exc_info:
+        validate_transition(entity, frm, to, reason=None)
+    assert exc_info.value.code == 1005
+
+
+@pytest.mark.parametrize(
+    ("entity", "frm", "to"),
+    [
+        ("goal", "已完成", "进行中"),
+        ("theme", "已完成", "进行中"),
+    ],
+)
+def test_goal_theme_revert_with_reason_valid(entity, frm, to):
+    """goal/theme revert 有 reason -> 合法。"""
+    validate_transition(entity, frm, to, reason="回退原因")
+
+
+@pytest.mark.parametrize(
+    ("entity", "frm", "to"),
+    [
+        ("goal", "已暂停", "进行中"),
+        ("theme", "已暂停", "进行中"),
+    ],
+)
+def test_goal_theme_resume_no_reason_required(entity, frm, to):
+    """goal/theme resume 不要求 reason。"""
+    validate_transition(entity, frm, to, reason=None)
+
+
+# ===== get_change_type（S9 board 用）=====
+
+
+def test_get_change_type_forward():
+    """forward 流转返回 'forward'。"""
+    from app.core.state_machine import get_change_type
+
+    assert get_change_type("phase", "未开始", "进行中") == "forward"
+    assert get_change_type("task", "待执行", "已完成") == "forward"
+
+
+def test_get_change_type_pause_resume_revert():
+    """pause/resume/revert 流转返回对应 change_type。"""
+    from app.core.state_machine import get_change_type
+
+    assert get_change_type("phase", "进行中", "已暂停") == "pause"
+    assert get_change_type("phase", "已暂停", "进行中") == "resume"
+    assert get_change_type("phase", "已完成", "进行中") == "revert"
+    assert get_change_type("goal", "已完成", "进行中") == "revert"
+    assert get_change_type("theme", "进行中", "已暂停") == "pause"
+
+
+def test_get_change_type_illegal_returns_none():
+    """非法流转返回 None。"""
+    from app.core.state_machine import get_change_type
+
+    assert get_change_type("phase", "已完成", "未开始") is None
+    assert get_change_type("task", "待执行", "进行中") is None
+
+
 # ===== 非法流转抛 ValueError =====
 
 
