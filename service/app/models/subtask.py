@@ -15,6 +15,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -38,6 +39,8 @@ class Subtask(Base):
             name="ck_subtasks_status",
         ),
         UniqueConstraint("task_id", "sort_order", name="uq_subtasks_task_sort"),
+        Index("idx_subtasks_task", "task_id", "sort_order"),
+        Index("idx_subtasks_status", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

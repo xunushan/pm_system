@@ -9,7 +9,7 @@ version 乐观锁防止并发覆盖；expires_at 24h 过期。
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -26,6 +26,8 @@ class Draft(Base):
             "status IN ('pending','confirmed','expired','discarded')",
             name="ck_drafts_status",
         ),
+        Index("idx_drafts_user", "user_id", "story_type", "status"),
+        Index("idx_drafts_expires", "expires_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

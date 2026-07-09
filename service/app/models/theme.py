@@ -6,7 +6,7 @@ type 用于 pm-daily 推断 executor（learning/research/source->human；dev/sur
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -23,6 +23,7 @@ class Theme(Base):
             "status IN ('未开始','进行中','已完成','已暂停')",
             name="ck_themes_status",
         ),
+        Index("idx_themes_goal", "goal_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

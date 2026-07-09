@@ -11,6 +11,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     String,
     Text,
     func,
@@ -27,6 +28,7 @@ class WorkspaceProgress(Base):
             "file_type IN ('note','code','resource','exercise','design')",
             name="ck_workspace_progress_file_type",
         ),
+        Index("idx_workspace_progress_ws", "workspace_id", "date"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

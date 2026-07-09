@@ -38,6 +38,9 @@ jobs:
       # 验证迁移可应用（SQLite，无外部依赖）
       - run: uv run alembic upgrade head
 
+      # 验证 ORM 声明与 DB 一致（无 drift，如未声明的索引）
+      - run: uv run alembic check
+
   h5:
     name: H5 (build)
     runs-on: ubuntu-latest
