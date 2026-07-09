@@ -32,7 +32,7 @@ S1 规划（基石）
 | S6 周总结 | ✅已合并 | - | #8 | - | S5 | - |
 | S7 子任务配置 | ⬜未开始 | - | - | - | S1 | - |
 | S8 主动巡检 | ✅已合并 | - | #9 | - | S5,S6 | - |
-| S9 轻量编辑与回退 | ⬜未开始 | - | - | - | S8 | - |
+| S9 轻量编辑与回退 | ✅已合并 | - | #10 | - | S8 | - |
 
 状态图例：⬜未开始 / 🔄进行中 / 🔍审查中 / ✅已合并 / ⛔阻塞
 
@@ -56,6 +56,13 @@ S1 规划（基石）
 | S5 日终总结 | #6 | a59baba | 2026-07-09 | 314 passed | 无迁移(daily_records已含is_confirmed，S3留) + state_machine补pause/resume/revert reason校验(+ReasonRequiredError 1005) + cascade新增回退级联(cascade_revert: task回退->已完成上级拉回进行中,幂等只动已完成) + fileio.write_daily_md(vault_root配置) + TaskAppSvc.patch_status异议双向(forward复用complete/revert系统填默认reason"D6/D18裁决") + DailyAppSvc.generate_summary/confirm_summary + 新建StatsAppSvc(纯查询统计) + daily/tasks/stats路由 + webhook story5_标记完成/未完成/确认日终总结(3秒返回,刷卡片+daily.md异步)；裁决D6/D18冲突(异议revert系统填reason不弹窗)；review 无P0P1(2×P2+3×P3已修: P2-1已暂停态守卫/patch_status严格待执行↔已完成双向) |
 | S6 周总结 | #8 | 302dd30 | 2026-07-09 | 339 passed | weekly_records 1 model + 第5迁移(1表无索引,手动剔除autogenerate误带16个remove_index[issue#7遗留]) + WeeklyRecordRepository(get_by_week) + StatsAppSvc扩get_weekly_stats(daily_stats7天趋势/phase_health/agent_output_stats按file_type聚合/subtask_stats前置后置/supervisor_linking_status占位None[接口先行S8填]) + WeeklyAppSvc(generate_summary/confirm_summary/write_weekly_md_async) + fileio.write_weekly_md + weekly路由(替换桩为generate/confirm) + GET /stats/weekly(§3.11) + webhook story6_已阅周总结(3秒返回,weekly.md异步)；ISO周用date.fromisocalendar(周一~周日,与daily_records.week互逆一致,doc/04示例非标准ISO周)；纯回顾不改任何状态(有测试断言)；review 无P0P1(2×P2 N+1查询上限7天可忽略+1×P3风格,不阻塞) |
 | S8 主动巡检 | #9 | 20e566a | 2026-07-09 | 402 passed | 无迁移(无新表) + event_bus桩换真分发(进程内异步队列,已裁决:emit事务内queue.put_nowait不阻塞,daemon线程消费调handler,重启丢事件由巡检兜底,emit签名不变9处调用零改动) + handlers(on_phase/theme/goal_completed查下一阶段+deadline推算+推衔接卡片+Redis记时间,独立SessionLocal读DB无脏读,IO异常不崩溃) + scheduler(APScheduler5类cron巡检:scheduled_start_date/deadline临近/未确认计划10:00/未日终21:00/衔接24h未响应,Redis去重supervisor:notified,已暂停不巡检,每天1次) + linking(find_next_phase sort_order+1/compute_suggested_deadline纯计算/get_linking_status替换S6占位None) + schedules/activate端点(复用S2激活核心,triggered_by=supervisor,≤3校验,异步工作空间初始化) + webhook story8_确认激活/暂不激活/去激活/去页面调整 + main.py lifespan启停dispatcher+scheduler + conftest autouse禁用supervisor；裁决事件分发用进程内异步队列(非Redis pub/sub)；review 无P0P1(6×P2+2×P3已修:P2-1 _get_redis三处重复提redis_client.py复用[违反§11先搜后建]/P2-5 _DEFAULT_CHAT_ID私有名提constants.py/P2-2/3/4延迟import提顶/P3 _parse_iso迁times.py)；APScheduler依赖已加(pyproject) |
+| S9 轻量编辑与回退 | #10 | d8f8cf1 | 2026-07-09 | 447 passed | 无迁移(无新表) + **issue#7并入修复**(12 model补16个Index声明对应migration已建索引,alembic check通过消除16个remove_index,CI加alembic check步骤防回归,Fixes#7自动关闭) + BoardAppSvc(update_fields字段编辑/阶段排序/增删任务/managed不可改 + change_status复用S5 state_machine pause/resume/revert校验+ReasonRequiredError1005,forward拒绝走activate,级联调cascade_revert_entity) + cascade新增cascade_revert_entity(通用回退入口:task委托S5既有cascade_revert[禁重写],phase/theme/goal向上回退不向下回退子task[最小回退+DB唯一真相源],幂等只动已完成上级) + state_machine扩展goal/theme pause/resume/revert(与phase同规则,doc/02 line8依据) + board路由(PUT/{entity}/{id}字段编辑+POST/{entity}/{id}/status状态变更) + DELETE /tasks/{id}物理删除+关联清理(daily_tasks/subtasks/workspace_progress手动删,FK无CASCADE) + GET /workspaces/{id}(S4A已建managed/path只读确认)；裁决issue#7并入S9(收官清债)；review 无P0P1(2×P2+1×P3已修:P2-2 _apply_phase_orders全包含校验防UNIQUE冲突+补测试/P2-1 _VALID_ENTITIES死代码删/P3 _augment_revert_result未用参数删) |
+
+### 下游解锁（S9 合并后 -- 收官）
+- **S9 已合并**（PR #10, d8f8cf1）：收官 Story。board H5 编辑（PUT 字段/排序/增删）+ 状态回退（POST pause/resume/revert）+ DELETE 物理删除 + GET workspace managed/path。复用 S5 state_machine（扩 goal/theme）+ cascade_revert_entity（不向下回退，最小回退）。
+- **issue #7 已闭环**（PR #10 Fixes #7）：12 model 补 16 个 Index 声明，`alembic check` 通过，CI 加防回归步骤。**项目无遗留技术债**。
+- **剩余**：仅 **S7 子任务配置**（依赖 S1，已解锁，独立可做）。subtask_templates 表（§2.6，需迁移）+ H5 配置。
+- **项目状态**：S1-S6/S8/S9 全部合并（8/9 Story），447 测试绿。仅剩 S7 未做。S7 完成即全项目收官。
 
 ### 下游解锁（S8 合并后）
 - **S9 轻量编辑与状态回退**（依赖 S8）：✅ 已解锁，**最后一个 Story**。board H5 编辑（字段编辑/增删任务/阶段排序）+ 状态回退端点 `POST /board/{entity}/{id}/status`（pause/resume/revert，用户显式填 reason，缺失返回 1005；**state_machine 校验 S5 已实现全部 pause/resume/revert，调用方是 S9**，S9 直接复用，只补 board 端点 + reason 采集表单）+ 回退即时重算级联（cascade.cascade_revert S5 已实现，S9 调用）+ PUT /board/{entity}/{id}（字段编辑）+ GET /workspaces/{id}（managed/path 只读）。需迁移？S9 不建新表（用现有表 + 可能补 issue #7 的 Index 声明）。
