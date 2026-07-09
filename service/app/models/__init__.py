@@ -21,7 +21,7 @@ model 类只有被 import 才会注册到 metadata。
   - subtasks            ✅ Story3 起建（前置 INSERT）；S4B 扩后置+完成逻辑
   - status_change_log   ✅ Story2 起建（forward）；S5 扩 pause/resume/revert
   - weekly_records      ✅ Story6 (app/models/weekly_record.py)
-  - subtask_templates   ⬜ Story7
+  - subtask_templates   ✅ Story7 (app/models/subtask_template.py)
 """
 
 from importlib import import_module
