@@ -643,3 +643,114 @@ def test_handle_timeout_sends_alert(db_session):
 
     assert data.alert_sent is True
     mock_send.assert_called_once()
+
+
+# ===== trigger_reject_async（事务后异步触发）=====
+
+
+def test_trigger_reject_async_retry_path(db_session, monkeypatch):
+    """trigger_reject_async retry 路径：dispatch_task + set_task_timeout 在后台执行。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 1
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    # patch SessionLocal -> 测试 engine
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "dispatch_task") as mock_dispatch,
+        patch.object(task_app_svc, "set_task_timeout") as mock_set_timeout,
+    ):
+        task_app_svc.TaskAppSvc.trigger_reject_async(task.id, "需要修改")
+
+    mock_dispatch.assert_called_once()
+    mock_set_timeout.assert_called_once()
+
+
+def test_trigger_reject_async_manual_intervention_path(db_session, monkeypatch):
+    """trigger_reject_async manual_intervention 路径：shutdown + 飞书通知在后台执行。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 3
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "shutdown", return_value=True) as mock_shutdown,
+        patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
+    ):
+        task_app_svc.TaskAppSvc.trigger_reject_async(task.id, "多次不过")
+
+    mock_shutdown.assert_called_once()
+    mock_send.assert_called_once()
+
+
+def test_output_reject_no_sync_http_in_retry(db_session, monkeypatch):
+    """output_reject retry 路径不同步调 dispatch_task（铁律 §3#4 飞书 3 秒超时）。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 0
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    # output_reject 不应同步调 dispatch_task（只在 trigger_reject_async 后台调）
+    with patch.object(task_app_svc.OpenCodeClient, "dispatch_task") as mock_dispatch:
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "fb")
+
+    assert data.action == "retry"
+    # output_reject 本身不同步调 dispatch_task
+    mock_dispatch.assert_not_called()
+
+
+def test_output_reject_no_sync_http_in_manual_intervention(db_session, monkeypatch):
+    """output_reject manual_intervention 路径不同步调 shutdown/send_text。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 3
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "shutdown") as mock_shutdown,
+        patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "fb")
+
+    assert data.action == "manual_intervention"
+    # output_reject 本身不同步调 shutdown / send_text
+    mock_shutdown.assert_not_called()
+    mock_send.assert_not_called()

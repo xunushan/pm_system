@@ -3,7 +3,8 @@
 Story4B 方法：
   - complete：标记任务完成 + 即时级联（完成和后置脱钩，不含后置）。
   - post_confirm：后置确认（INSERT 勾选的后置子任务，可全取消）+ 事务后异步执行。
-  - create_subtask / get_subtask / patch_subtask：子任务 CRUD（供 pm-subtask Skill 与异步回调使用）。
+  - create_subtask / get_subtask / patch_subtask：子任务 CRUD
+    （供 pm-subtask Skill 与异步回调使用）。
   - trigger_post_async：事务后异步执行后置子任务。
 
 Story4A 方法：
@@ -15,7 +16,8 @@ Story4A 方法：
   - trigger_reject_async：output_reject 事务后异步触发（dispatch/shutdown/通知）。
 
 铁律（CLAUDE.md §3）：
-  - Service 不调 LLM（§3#1）：complete/confirm 只标记完成+级联；验收卡片模板填充；后置内容由 pm-subtask Skill 生成。
+  - Service 不调 LLM（§3#1）：complete/confirm 只标记完成+级联；
+    验收卡片模板填充；后置内容由 pm-subtask Skill 生成。
   - 事务内禁 IO/HTTP（§3#3）：opencode dispatch/feishu/Redis 事务后异步。
   - 即时级联在事务内（§3#3）：cascade.cascade_status 在 commit 前。
   - 状态机（§3#7）：task forward 写 status_change_log。
@@ -409,10 +411,14 @@ class TaskAppSvc:
     def output_reject(self, task_id: str, user_id: str, feedback: str) -> OutputRejectData:
         """退回智能体产出，重试或通知。
 
+        事务内（铁律 §3#3/#4）：仅更新 retry_count + COMMIT。
+        事务后异步（由路由层 BackgroundTasks 调 trigger_reject_async）：
+          - retry 路径：dispatch_task + 重设 Redis 超时
+          - manual_intervention 路径：opencode shutdown + 飞书通知
+
         逻辑（doc/04 行654, doc/06 步骤8）：
-          - retry_count < 3：retry_count+=1，重新 dispatch + 重设 Redis -> action='retry'
-          - retry_count >= 3：opencode shutdown + 通知 + path
-            -> action='manual_intervention'
+          - retry_count < 3：retry_count+=1 -> action='retry'
+          - retry_count >= 3：不改状态 -> action='manual_intervention'
 
         3 次不通过不改 task 状态（doc/01 4A要点）。
         """
@@ -421,13 +427,9 @@ class TaskAppSvc:
             raise NotFoundError(f"任务不存在: {task_id}")
 
         if task.retry_count < MAX_RETRY:
-            # 重试路径
+            # 重试路径：事务内仅更新 retry_count
             task.retry_count += 1
             self.db.commit()
-
-            # 异步：重新下发任务 + 重设超时
-            self._retry_dispatch(task, feedback)
-
             return OutputRejectData(
                 task_id=task_id,
                 retry_count=task.retry_count,
@@ -436,26 +438,9 @@ class TaskAppSvc:
                 async_triggered=True,
             )
         else:
-            # 超次路径：3 次不通过不改状态
+            # 超次路径：3 次不通过不改状态，事务内无需写 DB
             workspace = self._get_workspace_for_task(task)
             workspace_path = workspace.path if workspace else None
-
-            # opencode shutdown
-            self.opencode.shutdown(self._get_workspace_id_for_task(task))
-
-            # 飞书通知（事务外异步）
-            try:
-                self.feishu.send_text(
-                    "chat_id_placeholder",
-                    f"⚠️ 智能体任务多次验收不通过\n"
-                    f"任务：{task.name}\n"
-                    f"工作空间路径：{workspace_path}\n"
-                    f"反馈：{feedback}\n"
-                    f"请手动启动 opencode 处理。",
-                )
-            except Exception:
-                logger.exception("发送 manual_intervention 通知失败: task=%s", task.id)
-
             return OutputRejectData(
                 task_id=task_id,
                 retry_count=task.retry_count,
@@ -465,7 +450,50 @@ class TaskAppSvc:
                 workspace_path=workspace_path,
             )
 
-    # ---- POST /api/callback/opencode/output (Story4A) ----
+    @staticmethod
+    def trigger_reject_async(task_id: str, feedback: str) -> None:
+        """output_reject 事务后异步触发（独立 session，BackgroundTasks 调用）。
+
+        铁律 §3#3/#4：HTTP/Redis/feishu 均在事务后异步，满足飞书 3 秒回调。
+
+        retry 路径：dispatch_task + 重设 Redis 超时。
+        manual_intervention 路径：opencode shutdown + 飞书通知。
+        """
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            if task is None:
+                return
+
+            if task.retry_count < MAX_RETRY:
+                # retry 路径：重新下发任务 + 重设超时
+                svc = TaskAppSvc(db)
+                svc._retry_dispatch(task, feedback)
+            else:
+                # manual_intervention 路径：shutdown + 飞书通知
+                svc = TaskAppSvc(db)
+                workspace = svc._get_workspace_for_task(task)
+                workspace_path = workspace.path if workspace else None
+                workspace_id = svc._get_workspace_id_for_task(task)
+                if workspace_id:
+                    svc.opencode.shutdown(workspace_id)
+                try:
+                    svc.feishu.send_text(
+                        "chat_id_placeholder",
+                        f"⚠️ 智能体任务多次验收不通过\n"
+                        f"任务：{task.name}\n"
+                        f"工作空间路径：{workspace_path}\n"
+                        f"反馈：{feedback}\n"
+                        f"请手动启动 opencode 处理。",
+                    )
+                except Exception:
+                    logger.exception("发送 manual_intervention 通知失败: task=%s", task.id)
+        except Exception:
+            logger.exception("trigger_reject_async 失败: task=%s", task_id)
+        finally:
+            db.close()
+
+    # ---- POST /api/callback/opencode/output ----
 
     def record_output(
         self, task_id: str, workspace_id: str, outputs: list[dict]

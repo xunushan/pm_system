@@ -123,6 +123,26 @@ def test_start_agent_serve_reuses_running_process(db_session):
     assert port == 10050
 
 
+def test_start_agent_serve_dispatch_after_commit(db_session):
+    """P0 铁律 §3#3：dispatch_task 在 commit 之后执行。
+
+    即使 dispatch_task 抛异常，agent_processes 记录仍已提交到 DB。
+    """
+    ws = _setup_workspace(db_session)
+    task = {"task_id": "t1", "name": "test"}
+
+    # dispatch_task 抛异常，但 agent_processes 应已提交
+    with patch.object(OpenCodeClient, "dispatch_task", side_effect=Exception("HTTP failed")):
+        client = OpenCodeClient(db_session)
+        port = client.start_agent_serve(ws.id, task)
+
+    # 进程记录仍已提交（dispatch 失败不影响已提交的 DB 记录）
+    assert port > 0
+    ap = db_session.query(AgentProcess).filter_by(workspace_id=ws.id).one()
+    assert ap.status == "running"
+    assert ap.port == port
+
+
 def test_start_agent_serve_restarts_stopped_process(db_session):
     """stopped 进程重启：更新记录，分配新端口。"""
     ws = _setup_workspace(db_session)
@@ -186,3 +206,23 @@ def test_shutdown_returns_false_when_no_process(db_session):
     ws = _setup_workspace(db_session)
     client = OpenCodeClient(db_session)
     assert client.shutdown(ws.id) is False
+
+
+def test_shutdown_commits_db_before_http(db_session):
+    """P1-1 铁律 §3#3：shutdown 先提交 DB（status='stopped'），再 best-effort HTTP。
+
+    即使 HTTP 失败，DB 状态仍为 stopped。
+    """
+    ws = _setup_workspace(db_session)
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    # HTTP 抛异常，但 DB 状态应已提交为 stopped
+    with patch("app.clients.opencode.httpx.post", side_effect=Exception("HTTP failed")):
+        client = OpenCodeClient(db_session)
+        result = client.shutdown(ws.id)
+
+    assert result is True
+    db_session.refresh(ap)
+    assert ap.status == "stopped"

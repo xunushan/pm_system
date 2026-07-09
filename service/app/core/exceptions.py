@@ -11,9 +11,7 @@ from app.schemas.common import (
     CODE_DRAFT_EXPIRED,
     CODE_INTERNAL,
     CODE_NOT_FOUND,
-    CODE_OPENCODE_FAIL,
     CODE_QUOTA_EXCEEDED,
-    CODE_WORKSPACE_INIT_FAIL,
 )
 
 
@@ -57,17 +55,3 @@ class DraftExpiredError(AppError):
 class InternalError(AppError):
     def __init__(self, message: str = "内部错误") -> None:
         super().__init__(CODE_INTERNAL, message, http_status=500)
-
-
-class OpenCodeError(AppError):
-    """OpenCode 调用失败（doc/04 2.3: 2001）。"""
-
-    def __init__(self, message: str = "OpenCode 调用失败") -> None:
-        super().__init__(CODE_OPENCODE_FAIL, message, http_status=502)
-
-
-class WorkspaceInitError(AppError):
-    """工作空间初始化失败（doc/04 2.3: 2002）。"""
-
-    def __init__(self, message: str = "工作空间初始化失败") -> None:
-        super().__init__(CODE_WORKSPACE_INIT_FAIL, message, http_status=500)

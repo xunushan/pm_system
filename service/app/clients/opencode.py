@@ -72,7 +72,8 @@ class OpenCodeClient:
           1. 查 workspace 路径
           2. 查该 workspace 是否已有 running 进程 -> 是则复用端口
           3. 否则分配端口 + 创建/更新 agent_processes 记录
-          4. HTTP POST 下发首个智能体任务（如有）
+          4. COMMIT（事务内禁止 IO/HTTP，铁律 §3#3）
+          5. 事务后：HTTP POST 下发首个智能体任务（如有）
 
         Args:
             workspace_id: 工作空间 ID。
@@ -83,6 +84,7 @@ class OpenCodeClient:
         """
         own_session = self.db is None
         db = self.db or SessionLocal()
+        port = -1
         try:
             ws = db.get(Workspace, workspace_id)
             if ws is None:
@@ -111,25 +113,20 @@ class OpenCodeClient:
                     existing.started_at = now
                     existing.last_heartbeat = now
                     existing.task_queue = None
-                    ap = existing
                 else:
-                    ap = AgentProcess(
+                    new_ap = AgentProcess(
                         id=str(uuid4()),
                         workspace_id=workspace_id,
                         port=port,
                         status="running",
                         last_heartbeat=now,
                     )
-                    db.add(ap)
+                    db.add(new_ap)
                 db.flush()
                 logger.info("start_agent_serve: 新进程 ws=%s port=%d", workspace_id, port)
 
-            # 下发首个任务（HTTP POST，事务外 IO）
-            if task:
-                self.dispatch_task(workspace_id, task, port)
-
+            # COMMIT 先提交 agent_processes 记录（铁律 §3#3：事务内禁止 IO/HTTP）
             db.commit()
-            return port
         except Exception:
             db.rollback()
             logger.exception("start_agent_serve 失败: ws=%s", workspace_id)
@@ -137,6 +134,18 @@ class OpenCodeClient:
         finally:
             if own_session:
                 db.close()
+
+        # 事务后：下发首个任务（HTTP POST，事务外 IO）
+        # dispatch_task 失败不影响已提交的 agent_processes 记录（由 health/重试处理）
+        if task and port > 0:
+            try:
+                self.dispatch_task(workspace_id, task, port)
+            except Exception:
+                logger.exception(
+                    "start_agent_serve dispatch_task 失败: ws=%s port=%d", workspace_id, port
+                )
+
+        return port
 
     # ---- 任务下发 ----
 
@@ -228,13 +237,15 @@ class OpenCodeClient:
     def shutdown(self, workspace_id: str) -> bool:
         """停止 opencode serve（3 次重试不通过时调用）。
 
-        HTTP POST /shutdown（best effort），更新 agent_processes.status='stopped'。
+        先提交 DB（status='stopped'），再 best-effort HTTP POST /shutdown。
+        铁律 §3#3：事务内禁止 IO/HTTP，HTTP 在 commit 之后。
 
         Returns:
             True 如果成功停止，False 如果进程不存在。
         """
         own_session = self.db is None
         db = self.db or SessionLocal()
+        port = None
         try:
             ap = db.scalar(
                 select(AgentProcess).where(
@@ -244,19 +255,27 @@ class OpenCodeClient:
             )
             if ap is None:
                 return False
-            # HTTP POST /shutdown（best effort，失败不阻断状态更新）
-            try:
-                httpx.post(f"http://localhost:{ap.port}/shutdown", timeout=5)
-            except Exception:
-                logger.warning("shutdown HTTP 调用失败（best effort）: ws=%s", workspace_id)
+            # 先更新 DB 状态并提交（事务内禁止 IO/HTTP）
             ap.status = "stopped"
+            port = ap.port
             db.commit()
-            logger.info("shutdown: ws=%s port=%d stopped", workspace_id, ap.port)
-            return True
+            logger.info("shutdown: ws=%s port=%d stopped", workspace_id, port)
+            stopped = True
         except Exception:
             db.rollback()
-            logger.exception("shutdown 失败: ws=%s", workspace_id)
+            logger.exception("shutdown DB 更新失败: ws=%s", workspace_id)
             return False
         finally:
             if own_session:
                 db.close()
+
+        # 事务后：best-effort HTTP POST /shutdown（失败不回滚已提交的 DB 状态）
+        if port is not None:
+            try:
+                httpx.post(f"http://localhost:{port}/shutdown", timeout=5)
+            except Exception:
+                logger.warning(
+                    "shutdown HTTP 调用失败（best effort）: ws=%s port=%d", workspace_id, port
+                )
+
+        return stopped
