@@ -24,7 +24,7 @@ S1 规划（基石）
 | Story | 状态 | 分支 | PR | 负责人 | 依赖 | 阻塞 |
 |-------|------|------|----|--------|------|------|
 | S1 目标规划与确认 | ✅已合并 | - | #1 | - | 无 | - |
-| S2 调度激活 | ⬜未开始 | - | - | - | S1 | - |
+| S2 调度激活 | ✅已合并 | - | #2 | - | S1 | - |
 | S3 今日计划推送 | ⬜未开始 | - | - | - | S2 | - |
 | S4A 智能体执行 | ⬜未开始 | - | - | - | S3 | - |
 | S4B 人完成任务 | ⬜未开始 | - | - | - | S3 | - |
@@ -49,8 +49,15 @@ S1 规划（基石）
 | Story | PR | 合并 commit | 日期 | 测试 | 备注 |
 |-------|----|-------------|------|------|------|
 | S1 目标规划与确认 | #1 | a6a34d3 | 2026-07-09 | 90 passed | themes/phases/tasks/drafts 4 model + 首迁移(5表6索引) + repo + DraftAppSvc/PlanAppSvc.confirm + drafts/plans 路由 + emit 桩；review 2×P1 已修 |
+| S2 调度激活 | #2 | cd8f7b8 | 2026-07-09 | 137 passed | workspaces+status_change_log 2 model + 第2迁移(2表3索引) + cascade激活级联/state_machine forward/audit 实现 + ScheduleAppSvc.confirm(≤3/自动锁定/级联/审计/异步初始化) + WorkspaceAppSvc + schedules/workspaces路由 + webhook schedule.confirm；S2提前建审计表(铁律§3#7)；review P2-1(错误码1004)/P2-2(path校验前置事务外)已修 |
+
+### 下游解锁（S2 合并后）
+- **S3 今日计划推送**（依赖 S2）：✅ 已解锁，可派发。S3 在关键路径上（S4A/S4B 依赖 S3）。
+- **S7 子任务配置**（依赖 S1）：仍 ✅ 已解锁（S1 已合并），可派发。与 S3 无依赖关系，可并行。
+- 并行窗口 2（{S4A‖S4B}）尚未打开：需先 S3 合并。
+- 注：S5（日终总结）需扩 state_machine 的 pause/resume/revert + audit 回退支持（S2 已建 status_change_log 表与 forward 基础）。
 
 ### 下游解锁（S1 合并后）
-- **S2 调度激活**（依赖 S1）：✅ 已解锁，可派发。
-- **S7 子任务配置**（依赖 S1）：✅ 已解锁，可派发。
-- 并行窗口 1（{S2‖S7}）打开：两者依赖均已满足，可并行；但须一个合完、main 更新后另一个 rebase 再合（见 CLAUDE.md §12）。
+- S2 调度激活：✅ 已合并（见上）。
+- S7 子任务配置：✅ 已解锁（仍可派发）。
+- 并行窗口 1（{S2‖S7}）：S2 已合，S7 可独立做。
