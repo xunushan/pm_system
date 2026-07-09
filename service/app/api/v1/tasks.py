@@ -8,11 +8,14 @@ Story4A：
 
 Story4B：
   POST /tasks/{taskId}/complete           标记完成（即时级联，不含后置）
-  POST /tasks/{taskId}/post-confirm       后置确认（INSERT 后置，可全取消）
+  POST /tasks/{taskId}/post-confirm        后置确认（INSERT 后置，可全取消）
+
+Story5：
+  PATCH /tasks/{taskId}                   日终异议双向状态变更（即时级联 + 刷新卡片）
 
 Story9：
   DELETE /tasks/{taskId}                  物理删除
-  PATCH /tasks/{taskId}/status            状态变更（暂停/恢复/回退）
+  POST  /board/{entity}/{id}/status       H5 状态变更（暂停/恢复/回退，含 reason）
 """
 
 from typing import Annotated
@@ -34,6 +37,8 @@ from app.schemas.task import (
     TaskCompleteData,
     TaskCompleteRequest,
     TaskDetailData,
+    TaskPatchStatusData,
+    TaskPatchStatusRequest,
 )
 from app.services.task_app_svc import TaskAppSvc
 
@@ -112,4 +117,28 @@ def output_reject(
     data = TaskAppSvc(db).output_reject(task_id, payload.user_id, payload.feedback)
     # 事务后异步：retry 的 dispatch_task + Redis / manual_intervention 的 shutdown + 通知
     background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, payload.feedback)
+    return ApiResponse(data=data)
+
+
+# ---- Story5: 日终异议双向 PATCH ----
+
+
+@router.patch("/{task_id}", response_model=ApiResponse[TaskPatchStatusData])
+def patch_task_status(
+    task_id: str,
+    payload: TaskPatchStatusRequest,
+    db: DBSession,
+) -> ApiResponse[TaskPatchStatusData]:
+    """日终异议双向状态变更：待执行↔已完成。
+
+    触发即时级联（forward 完成级联 / revert 回退级联）。
+    revert 由系统自动填默认 reason（D18 裁决：不弹窗）。
+    事务后异步刷卡片由 webhook 层 BackgroundTasks 负责（API 层不需要）。
+    """
+    data = TaskAppSvc(db).patch_status(
+        task_id=task_id,
+        status=payload.status,
+        triggered_by=payload.triggered_by,
+        completed_at=payload.completed_at,
+    )
     return ApiResponse(data=data)

@@ -1,7 +1,7 @@
 """飞书卡片回调入口（入口 B）。
 
 飞书 3 秒超时：回调仅做 DB 写 + 即时级联（<200ms）后立即返回；
-耗时操作（工作空间初始化、opencode 执行）事务提交后异步（BackgroundTasks）。
+耗时操作（工作空间初始化、opencode 执行、刷卡片、写 daily.md）事务提交后异步（BackgroundTasks）。
 
 action_id 硬编码路由（doc/06）：
   schedule.confirm       -> ScheduleAppSvc.confirm（S2：多选专题+managed/path+deadline）
@@ -10,6 +10,9 @@ action_id 硬编码路由（doc/06）：
   story4B_不需要后置     -> TaskAppSvc.post_confirm（S4B：全取消，不插入后置）
   story4A_验收通过       -> TaskAppSvc.output_confirm（S4A：验收通过 -> 标记完成+即时级联）
   story4A_需要修改       -> TaskAppSvc.output_reject（S4A：重试/通知）
+  story5_标记完成        -> TaskAppSvc.patch_status（S5：异议 forward，即时级联+异步刷卡片）
+  story5_标记未完成      -> TaskAppSvc.patch_status（S5：异议 revert，系统填 reason+异步刷卡片）
+  story5_确认日终总结    -> DailyAppSvc.confirm_summary（S5：标记 is_confirmed+异步写 daily.md）
 其余 action_id 保留 TODO，由后续 Story 实现。
 """
 
@@ -105,6 +108,33 @@ async def feishu_card_callback(
         data = TaskAppSvc(db).output_reject(task_id, user_id, feedback)
         # 事务后异步：retry 的 dispatch_task + Redis / manual_intervention 的 shutdown + 通知
         background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, feedback)
+        return ApiResponse(data=data).model_dump()
+
+    # ---- Story5: 日终总结异议 + 确认 ----
+
+    if action_id in ("story5_标记完成", "story5_标记未完成"):
+        task_id = action_value.get("task_id")
+        message_id = action_value.get("message_id", "")
+        daily_id = action_value.get("daily_id", "")
+        if not task_id:
+            return {"code": 1002, "message": "回调缺少 task_id", "data": None}
+        target_status = "已完成" if action_id == "story5_标记完成" else "待执行"
+        # 事务内：DB 写 + 即时级联（<200ms）；立即返回
+        data = TaskAppSvc(db).patch_status(task_id, target_status, triggered_by="user")
+        # 事务后异步：刷新卡片（message_id 调 feishu update_card，3 秒超时内不阻塞）
+        background_tasks.add_task(
+            TaskAppSvc.refresh_summary_card_async, task_id, message_id, daily_id
+        )
+        return ApiResponse(data=data).model_dump()
+
+    if action_id == "story5_确认日终总结":
+        daily_id = action_value.get("daily_id")
+        if not daily_id:
+            return {"code": 1002, "message": "回调缺少 daily_id", "data": None}
+        # 事务内：UPDATE is_confirmed + COMMIT（<200ms）；立即返回
+        data = DailyAppSvc(db).confirm_summary(daily_id)
+        # 事务后异步：写 daily.md 快照（3 秒超时内不阻塞）
+        background_tasks.add_task(DailyAppSvc.write_daily_md_async, daily_id)
         return ApiResponse(data=data).model_dump()
 
     return {"code": 0, "message": "noop", "data": None}

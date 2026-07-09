@@ -71,3 +71,52 @@ class DailyConfirmData(BaseModel):
     task_count: int
     pre_subtask_count: int
     async_triggered: bool
+
+
+# ---- GET /daily/summary/generate + POST /daily/summary/confirm (Story5) ----
+
+
+class DailySummaryTaskItem(BaseModel):
+    """日终总结任务项。"""
+
+    task_id: str
+    name: str
+    theme_name: str
+
+
+class DailySummaryPhaseHealth(BaseModel):
+    """阶段健康度。"""
+
+    phase_id: str
+    name: str
+    completed: int
+    total: int
+    rate: float
+    status: str
+
+
+class DailySummaryData(BaseModel):
+    """GET /daily/summary/generate 响应（纯查询，无 LLM）。"""
+
+    date: date
+    daily_id: str | None = None
+    is_confirmed: bool = False
+    completed_tasks: list[DailySummaryTaskItem] = []
+    incomplete_tasks: list[DailySummaryTaskItem] = []
+    phase_health: list[DailySummaryPhaseHealth] = []
+    active_phase_count: int = 0
+    global_active_limit: int = 3
+
+
+class DailySummaryConfirmRequest(BaseModel):
+    """POST /daily/summary/confirm 请求。"""
+
+    daily_id: str
+
+
+class DailySummaryConfirmData(BaseModel):
+    """POST /daily/summary/confirm 响应。"""
+
+    daily_id: str
+    confirmed: bool
+    daily_md_path: str | None = None

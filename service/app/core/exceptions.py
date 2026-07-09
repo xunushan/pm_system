@@ -12,6 +12,7 @@ from app.schemas.common import (
     CODE_INTERNAL,
     CODE_NOT_FOUND,
     CODE_QUOTA_EXCEEDED,
+    CODE_REASON_REQUIRED,
 )
 
 
@@ -50,6 +51,13 @@ class BadRequestError(AppError):
 class DraftExpiredError(AppError):
     def __init__(self, message: str = "草稿已过期") -> None:
         super().__init__(CODE_DRAFT_EXPIRED, message, http_status=410)
+
+
+class ReasonRequiredError(AppError):
+    """回退/暂停需 reason（doc/04 2.3: 1005）。"""
+
+    def __init__(self, message: str = "状态回退/暂停需 reason") -> None:
+        super().__init__(CODE_REASON_REQUIRED, message, http_status=400)
 
 
 class InternalError(AppError):

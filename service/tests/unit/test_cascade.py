@@ -239,3 +239,155 @@ def test_cascade_paused_phase_not_completed(db_session):
     db_session.flush()
     assert result["phase_completed"] is False
     assert phase.status == "已暂停"
+
+
+# ===== 回退级联（Story5，doc/02 2.16 revert 触发即时重算级联）=====
+
+
+def test_cascade_revert_pulls_phase_back_to_active(db_session):
+    """task 回退 -> phase 已完成 -> 拉回'进行中'（清 completed_at + cascade 审计 + emit）。"""
+    goal, themes, phases, tasks_by_phase = _setup_active_tree(db_session, tasks_per_phase=1)
+    phase = phases[0]
+    # 先完成所有 task -> phase/theme/goal 完成
+    for t in tasks_by_phase[phase.id]:
+        t.status = "已完成"
+    db_session.flush()
+    cascade.cascade_status(db_session, "task", tasks_by_phase[phase.id][0].id)
+    db_session.flush()
+    assert phase.status == "已完成"
+    assert phase.completed_at is not None
+
+    # 回退 task -> 待执行
+    task = tasks_by_phase[phase.id][0]
+    task.status = "待执行"
+    db_session.flush()
+
+    result = cascade.cascade_revert(db_session, task.id)
+    db_session.flush()
+
+    assert result["phase_reverted"] is True
+    assert result["theme_reverted"] is True
+    assert result["goal_reverted"] is True
+    assert phase.status == "进行中"
+    assert phase.completed_at is None
+    assert themes[0].status == "进行中"
+    assert goal.status == "进行中"
+
+
+def test_cascade_revert_stops_at_first_non_completed(db_session):
+    """task 回退 -> phase 已完成 -> 拉回；但 theme 未完成 -> theme/goal 不动。"""
+    goal, themes, phases, tasks_by_phase = _setup_active_tree(
+        db_session, tasks_per_phase=1, phases_per_theme=2
+    )
+    # 只完成 phase[0]
+    phase0 = phases[0]
+    for t in tasks_by_phase[phase0.id]:
+        t.status = "已完成"
+    db_session.flush()
+    cascade.cascade_status(db_session, "task", tasks_by_phase[phase0.id][0].id)
+    db_session.flush()
+    assert phase0.status == "已完成"
+    assert themes[0].status == "进行中"  # phase[1] 未完成 -> theme 不完成
+
+    # 回退 task
+    task = tasks_by_phase[phase0.id][0]
+    task.status = "待执行"
+    db_session.flush()
+
+    result = cascade.cascade_revert(db_session, task.id)
+    db_session.flush()
+
+    assert result["phase_reverted"] is True
+    assert result["theme_reverted"] is False  # theme 本来就不是已完成
+    assert result["goal_reverted"] is False
+    assert phase0.status == "进行中"
+    assert themes[0].status == "进行中"
+    assert goal.status == "进行中"
+
+
+def test_cascade_revert_idempotent_when_phase_not_completed(db_session):
+    """phase 不在'已完成'时，回退级联不改动任何上级（幂等）。"""
+    goal, themes, phases, tasks_by_phase = _setup_active_tree(db_session, tasks_per_phase=2)
+    phase = phases[0]
+    # 完成 1/2 task -> phase 仍进行中
+    tasks = tasks_by_phase[phase.id]
+    tasks[0].status = "已完成"
+    db_session.flush()
+
+    result = cascade.cascade_revert(db_session, tasks[0].id)
+    db_session.flush()
+
+    assert result == {"phase_reverted": False, "theme_reverted": False, "goal_reverted": False}
+    assert phase.status == "进行中"
+    assert themes[0].status == "进行中"
+    assert goal.status == "进行中"
+
+
+def test_cascade_revert_writes_cascade_audit(db_session):
+    """回退级联每级写一条 cascade 审计（from=已完成, to=进行中, triggered_by=cascade）。"""
+    goal, themes, phases, tasks_by_phase = _setup_active_tree(db_session, tasks_per_phase=1)
+    phase = phases[0]
+    for t in tasks_by_phase[phase.id]:
+        t.status = "已完成"
+    db_session.flush()
+    cascade.cascade_status(db_session, "task", tasks_by_phase[phase.id][0].id)
+    db_session.flush()
+
+    # 清除完成级联的审计日志，只测回退级联
+    db_session.query(StatusChangeLog).filter(StatusChangeLog.change_type == "cascade").delete()
+    db_session.flush()
+
+    task = tasks_by_phase[phase.id][0]
+    task.status = "待执行"
+    db_session.flush()
+
+    cascade.cascade_revert(db_session, task.id)
+    db_session.flush()
+
+    revert_logs = (
+        db_session.query(StatusChangeLog)
+        .filter(StatusChangeLog.change_type == "cascade")
+        .order_by(StatusChangeLog.changed_at)
+        .all()
+    )
+    # 3 条：phase + theme + goal
+    assert len(revert_logs) == 3
+    assert {log.entity_type for log in revert_logs} == {"phase", "theme", "goal"}
+    for log in revert_logs:
+        assert log.from_status == "已完成"
+        assert log.to_status == "进行中"
+        assert log.triggered_by == "cascade"
+
+
+def test_cascade_revert_does_not_touch_paused_or_not_started(db_session):
+    """上级为'已暂停'或'未开始'时，回退级联不改动（只动'已完成'的）。"""
+    goal, themes, phases, tasks_by_phase = _setup_active_tree(db_session, tasks_per_phase=1)
+    phase = phases[0]
+    # 完成 task -> phase/theme/goal 完成
+    for t in tasks_by_phase[phase.id]:
+        t.status = "已完成"
+    db_session.flush()
+    cascade.cascade_status(db_session, "task", tasks_by_phase[phase.id][0].id)
+    db_session.flush()
+
+    # 把 theme 设为已暂停（异常状态，测试防御）
+    themes[0].status = "已暂停"
+    db_session.flush()
+
+    task = tasks_by_phase[phase.id][0]
+    task.status = "待执行"
+    db_session.flush()
+
+    result = cascade.cascade_revert(db_session, task.id)
+    db_session.flush()
+
+    assert result["phase_reverted"] is True  # phase 已完成 -> 回退
+    assert result["theme_reverted"] is False  # theme 已暂停 -> 不动
+    assert themes[0].status == "已暂停"
+    assert goal.status == "已完成"  # goal 不动（theme 没回退）
+
+
+def test_cascade_revert_unknown_task_is_noop(db_session):
+    """不存在的 task_id -> noop，返回全 False。"""
+    result = cascade.cascade_revert(db_session, "no-such-id")
+    assert result == {"phase_reverted": False, "theme_reverted": False, "goal_reverted": False}

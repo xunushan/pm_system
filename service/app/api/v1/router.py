@@ -10,6 +10,7 @@ from app.api.v1 import (
     drafts,
     plans,
     schedules,
+    stats,
     subtasks,
     tasks,
     weekly,
@@ -28,4 +29,5 @@ api_router.include_router(workspaces.router, prefix="/workspaces", tags=["项目
 api_router.include_router(subtasks.router, prefix="/subtasks", tags=["子任务"])
 api_router.include_router(config.router, prefix="/config", tags=["配置"])
 api_router.include_router(agents.router, prefix="/agents", tags=["智能体进程"])
+api_router.include_router(stats.router, prefix="/stats", tags=["统计"])
 api_router.include_router(board.router, prefix="/board", tags=["H5看板编辑"])

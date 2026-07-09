@@ -27,18 +27,20 @@ Story4A 方法：
 """
 
 import logging
+from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_verification_card
+from app.clients.feishu import FeishuClient, build_daily_summary_card, build_verification_card
 from app.clients.opencode import OpenCodeClient
 from app.core import audit, cascade, state_machine
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.task_timeout import del_task_timeout, set_task_timeout
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
+from app.models.daily_record import DailyRecord
 from app.models.subtask import Subtask
 from app.models.task import Task
 from app.models.workspace import Workspace
@@ -57,15 +59,24 @@ from app.schemas.task import (
     PostConfirmData,
     PostSubtaskInput,
     RecordOutputData,
+    RevertCascadeResult,
     TaskCompleteData,
     TaskDetailData,
+    TaskPatchStatusData,
     TimeoutAlertData,
 )
+from app.services.daily_app_svc import DailyAppSvc
 from app.supervisor.event_bus import emit
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRY = 3
+
+# 日终异议 revert 系统默认 reason（D18 裁决：不弹窗，系统自动填，满足 D6 reason 必填）
+REVERT_REASON = "日终异议-标记未完成"
+
+# 已暂停任务不纳入日终异议（doc/02 §2.16：暂停态不纳入计划；暂停/恢复走 S9 board）
+PAUSED_NOT_IN_DISPUTE = "已暂停任务不在日终异议范围内（暂停/恢复走 S9 board 状态变更）"
 
 
 class TaskAppSvc:
@@ -145,6 +156,106 @@ class TaskAppSvc:
             status="已完成",
             cascade=CascadeResult(**cascade_result),
         )
+
+    # ---- PATCH /tasks/{taskId} (Story5 日终异议双向) ----
+
+    def patch_status(
+        self,
+        task_id: str,
+        status: str,
+        triggered_by: str = "user",
+        completed_at: datetime | None = None,
+    ) -> TaskPatchStatusData:
+        """日终异议双向状态变更（doc/04 §3.7 PATCH /tasks/{taskId}）。
+
+        双向（doc/01 S5 + D18 裁决）：
+          - 待执行->已完成（forward）：复用 complete 核心逻辑（validate + set + audit + 完成级联）。
+          - 已完成->待执行（revert）：系统自动填默认 reason（不弹窗，D18），审计可追溯（D6）。
+
+        事务内：DB 写 + 即时级联（<200ms）；事务后异步刷卡片（webhook 层）。
+        """
+        task = self.task_repo.get(task_id)
+        if task is None:
+            raise NotFoundError(f"任务不存在: {task_id}")
+
+        old_status = task.status
+
+        # ---- forward：待执行->已完成 ----
+        if status == "已完成":
+            if old_status == "已完成":
+                raise ConflictError(f"任务已完成: {task_id}")
+            # 已暂停任务不纳入日终异议（暂停/恢复走 S9 board 状态变更）
+            if old_status == "已暂停":
+                raise BadRequestError(PAUSED_NOT_IN_DISPUTE)
+            try:
+                state_machine.validate_transition("task", old_status, "已完成", None)
+            except ValueError as e:
+                raise BadRequestError(str(e)) from e
+
+            now = completed_at if completed_at is not None else now_utc_naive()
+            task.status = "已完成"
+            task.completed_at = now
+            task.status_changed_at = now
+
+            audit.log_status_change(
+                self.db,
+                entity_type="task",
+                entity_id=task_id,
+                from_status=old_status,
+                to_status="已完成",
+                change_type="forward",
+                triggered_by=triggered_by,
+            )
+
+            cascade_result = cascade.cascade_status(self.db, "task", task_id)
+            self.db.commit()
+
+            return TaskPatchStatusData(
+                task_id=task_id,
+                status="已完成",
+                cascade=CascadeResult(**cascade_result),
+            )
+
+        # ---- revert：已完成->待执行 ----
+        if status == "待执行":
+            # 已暂停任务不纳入日终异议（暂停/恢复走 S9 board 状态变更）
+            if old_status == "已暂停":
+                raise BadRequestError(PAUSED_NOT_IN_DISPUTE)
+            # 系统自动填默认 reason（D18 裁决：不弹窗，满足 D6 reason 必填）
+            try:
+                state_machine.validate_transition(
+                    "task", old_status, "待执行", reason=REVERT_REASON
+                )
+            except ValueError as e:
+                raise BadRequestError(str(e)) from e
+
+            now = now_utc_naive()
+            task.status = "待执行"
+            task.completed_at = None
+            task.status_changed_at = now
+
+            audit.log_status_change(
+                self.db,
+                entity_type="task",
+                entity_id=task_id,
+                from_status=old_status,
+                to_status="待执行",
+                change_type="revert",
+                reason=REVERT_REASON,
+                triggered_by=triggered_by,
+            )
+
+            # 回退级联（事务内，纯 DB <200ms）
+            revert_result = cascade.cascade_revert(self.db, task_id)
+            self.db.commit()
+
+            return TaskPatchStatusData(
+                task_id=task_id,
+                status="待执行",
+                cascade=RevertCascadeResult(**revert_result),
+            )
+
+        raise BadRequestError(f"不支持的目标状态: {status!r}（仅 已完成/待执行）")
 
     # ---- POST /tasks/{taskId}/post-confirm (Story4B) ----
 
@@ -546,6 +657,47 @@ class TaskAppSvc:
         return TimeoutAlertData(alert_sent=True)
 
     # ---- 辅助方法（Story4A）----
+
+    @staticmethod
+    def refresh_summary_card_async(task_id: str, message_id: str, daily_id: str) -> None:
+        """事务后异步刷新日终总结卡片（独立 session，BackgroundTasks 调用）。
+
+        异议状态变更后，重新查询统计数据 -> 构建新卡片 -> 调 feishu update_card 更新消息。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            # 查 daily_record 的日期，用该日期重新统计
+            daily = db.get(DailyRecord, daily_id) if daily_id else None
+            date_ = daily.date if daily else None
+            summary = DailyAppSvc(db).generate_summary("system", date_)
+            card = build_daily_summary_card(
+                daily_id=summary.daily_id or daily_id,
+                date_str=summary.date.isoformat(),
+                completed_tasks=[
+                    {"task_id": t.task_id, "name": t.name, "theme_name": t.theme_name}
+                    for t in summary.completed_tasks
+                ],
+                incomplete_tasks=[
+                    {"task_id": t.task_id, "name": t.name, "theme_name": t.theme_name}
+                    for t in summary.incomplete_tasks
+                ],
+                phase_health=[
+                    {
+                        "name": p.name,
+                        "completed": p.completed,
+                        "total": p.total,
+                        "rate": p.rate,
+                        "status": p.status,
+                    }
+                    for p in summary.phase_health
+                ],
+            )
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_summary_card_async 失败: task=%s", task_id)
+        finally:
+            db.close()
 
     def _to_detail(self, task: Task) -> TaskDetailData:
         return TaskDetailData(
