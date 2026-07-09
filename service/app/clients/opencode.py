@@ -7,6 +7,7 @@ TODO(Story4A)：实现 dispatch_task / health / shutdown。
 S3 桩（接口先行，同 event_bus.emit 桩之理）：
   - dispatch_pre_subtasks：异步执行前置子任务（opencode run）。
   - start_agent_serve：启动 opencode serve 接管智能体任务。
+  - dispatch_post_subtasks：异步执行后置子任务（opencode run，Story4B）。
   当前实现为 no-op + 打日志。S4A 换成真 HTTP dispatch + agent_processes 管理。
 """
 
@@ -52,3 +53,13 @@ class OpenCodeClient:
             workspace_id,
             task.get("task_id") if task else None,
         )
+
+    def dispatch_post_subtasks(self, subtasks: list[dict[str, Any]]) -> None:
+        """异步执行后置子任务（opencode run）。
+
+        S4B 桩：no-op + 打日志。S4A 实现真 HTTP POST 到 opencode serve。
+
+        Args:
+            subtasks: 后置子任务列表，每项含 id/name/task_id 等。
+        """
+        logger.info("opencode.dispatch_post_subtasks (stub): %d subtasks", len(subtasks))
