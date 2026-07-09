@@ -212,6 +212,26 @@ def test_put_board_theme_phase_orders(client, db_session):
     assert phases[1].sort_order == 3
 
 
+def test_put_board_theme_phase_orders_partial_returns_400(client, db_session):
+    """PUT /board/theme/{id}：phase_orders 缺一个 phase -> 400（需包含全部阶段）。"""
+    goal, themes, phases, _ = _activate_tree(db_session, phases_per_theme=3)
+    theme = themes[0]
+    # 只提交 2/3 个 phase
+    resp = client.put(
+        f"{_API}/board/theme/{theme.id}",
+        json={
+            "fields": {
+                "phase_orders": [
+                    {"phase_id": phases[2].id, "sort_order": 1},
+                    {"phase_id": phases[0].id, "sort_order": 2},
+                ]
+            }
+        },
+    )
+    assert resp.status_code == 400
+    assert "全部阶段" in resp.json()["message"]
+
+
 # ===== POST /board/{entity}/{id}/status =====
 
 

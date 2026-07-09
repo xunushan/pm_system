@@ -106,7 +106,7 @@ def cascade_revert_entity(db: Session, entity_type: str, entity_id: str) -> dict
     if entity_type == "task":
         # task 起点委托给 S5 既有 cascade_revert（行为不变），补 ID 字段
         result = cascade_revert(db, entity_id)
-        return _augment_revert_result(db, result, entity_type, entity_id)
+        return _augment_revert_result(db, result, entity_id)
 
     result = {
         "phase_reverted": False,
@@ -136,7 +136,7 @@ def cascade_revert_entity(db: Session, entity_type: str, entity_id: str) -> dict
     return result
 
 
-def _augment_revert_result(db: Session, result: dict, entity_type: str, entity_id: str) -> dict:
+def _augment_revert_result(db: Session, result: dict, entity_id: str) -> dict:
     """给 cascade_revert 返回值补 phase_id/theme_id/goal_id（供 board 响应引用）。"""
     task = db.get(Task, entity_id)
     if task is not None:

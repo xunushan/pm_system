@@ -26,9 +26,6 @@ router = APIRouter()
 
 DBSession = Annotated[Session, Depends(get_db)]
 
-# 支持的实体类型（路径参数校验）
-_VALID_ENTITIES = {"goal", "theme", "phase", "task"}
-
 
 @router.put("/{entity}/{entity_id}", response_model=ApiResponse[BoardUpdateData])
 def update_fields(

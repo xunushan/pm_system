@@ -128,13 +128,13 @@ class BoardAppSvc:
     def _apply_phase_orders(self, theme: Theme, phase_orders: list[dict]) -> None:
         """阶段重排：更新 phases.sort_order（doc/01 S9 场景3）。
 
-        两阶段更新避免 UNIQUE(theme_id, sort_order) 约束冲突：
-          1. 先把所有相关 phase 的 sort_order 加大偏移（临时值）
-          2. 再设置最终 sort_order
+        要求 phase_orders 包含该专题下全部 phase（避免部分重排导致
+        UNIQUE(theme_id, sort_order) 约束冲突或遗漏）。
         """
         if not isinstance(phase_orders, list):
             raise BadRequestError("phase_orders 必须是列表")
         items: list[tuple[str, int]] = []
+        submitted_ids: set[str] = set()
         for item in phase_orders:
             phase_id = item.get("phase_id") if isinstance(item, dict) else None
             sort_order = item.get("sort_order") if isinstance(item, dict) else None
@@ -143,9 +143,23 @@ class BoardAppSvc:
             phase = self.db.get(Phase, phase_id)
             if phase is None or phase.theme_id != theme.id:
                 raise BadRequestError(f"阶段不属于该专题或不存在: {phase_id}")
+            if phase_id in submitted_ids:
+                raise BadRequestError(f"phase_orders 含重复 phase_id: {phase_id}")
+            submitted_ids.add(phase_id)
             items.append((phase_id, sort_order))
 
-        # 两阶段更新：先偏移到临时大值，再设最终值
+        # 校验：phase_orders 必须包含该专题下全部 phase（避免部分重排冲突/遗漏）
+        all_phase_ids = {
+            p.id for p in self.db.scalars(select(Phase).where(Phase.theme_id == theme.id))
+        }
+        if submitted_ids != all_phase_ids:
+            missing = all_phase_ids - submitted_ids
+            raise BadRequestError(
+                f"阶段排序需包含该专题下全部阶段（缺少 {len(missing)} 个: {sorted(missing)}）"
+            )
+
+        # 两阶段更新避免 UNIQUE(theme_id, sort_order) 中间冲突：
+        # 先偏移到临时大值，再设最终值
         OFFSET = 10000
         for phase_id, _ in items:
             phase = self.db.get(Phase, phase_id)
