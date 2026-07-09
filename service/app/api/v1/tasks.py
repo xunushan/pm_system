@@ -1,10 +1,18 @@
 """任务接口。详见《服务API文档 v2.0》3.5。
 
-GET   /tasks/{taskId}              获取任务详情（含 executor）
-POST  /tasks/{taskId}/complete      Story4B 标记完成（即时级联，不含后置）
-POST  /tasks/{taskId}/post-confirm  Story4B 后置确认（INSERT 后置，可全取消）
+Story4A：
+  GET  /tasks/{taskId}                    任务详情（含 executor）
+  POST /tasks/{taskId}/confirm-complete   人工确认完成（即时级联，无后置）
+  POST /tasks/{taskId}/output/confirm     验收通过智能体产出
+  POST /tasks/{taskId}/output/reject      需要修改（重试/通知）
 
-confirm-complete / output 端点属 Story4A，留桩 TODO。
+Story4B：
+  POST /tasks/{taskId}/complete           标记完成（即时级联，不含后置）
+  POST /tasks/{taskId}/post-confirm       后置确认（INSERT 后置，可全取消）
+
+Story9：
+  DELETE /tasks/{taskId}                  物理删除
+  PATCH /tasks/{taskId}/status            状态变更（暂停/恢复/回退）
 """
 
 from typing import Annotated
@@ -15,11 +23,17 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.schemas.common import ApiResponse
 from app.schemas.task import (
+    ConfirmCompleteData,
+    ConfirmCompleteRequest,
+    OutputConfirmData,
+    OutputConfirmRequest,
+    OutputRejectData,
+    OutputRejectRequest,
     PostConfirmData,
     PostConfirmRequest,
     TaskCompleteData,
     TaskCompleteRequest,
-    TaskDetail,
+    TaskDetailData,
 )
 from app.services.task_app_svc import TaskAppSvc
 
@@ -28,8 +42,8 @@ router = APIRouter()
 DBSession = Annotated[Session, Depends(get_db)]
 
 
-@router.get("/{task_id}", response_model=ApiResponse[TaskDetail])
-def get_task(task_id: str, db: DBSession) -> ApiResponse[TaskDetail]:
+@router.get("/{task_id}", response_model=ApiResponse[TaskDetailData])
+def get_task(task_id: str, db: DBSession) -> ApiResponse[TaskDetailData]:
     """获取任务详情（含 executor）。"""
     data = TaskAppSvc(db).get_task(task_id)
     return ApiResponse(data=data)
@@ -65,8 +79,37 @@ def post_confirm(
     return ApiResponse(data=data)
 
 
-# ---- Story4A 端点留桩（confirm-complete / output）----
-# POST /tasks/{taskId}/confirm-complete   Story4A 人工确认完成
-# POST /tasks/{taskId}/output/confirm     Story4A 验收通过
-# POST /tasks/{taskId}/output/reject       Story4A 需要修改
-# TODO(Story4A): 实现上述端点，依赖本 Story 的完成级联。
+@router.post("/{task_id}/confirm-complete", response_model=ApiResponse[ConfirmCompleteData])
+def confirm_complete(
+    task_id: str, payload: ConfirmCompleteRequest, db: DBSession
+) -> ApiResponse[ConfirmCompleteData]:
+    """4A 人工确认完成。3 次重试不通过，用户手动接管后调用。即时级联，无后置。"""
+    data = TaskAppSvc(db).confirm_complete(task_id, payload.user_id)
+    return ApiResponse(data=data)
+
+
+@router.post("/{task_id}/output/confirm", response_model=ApiResponse[OutputConfirmData])
+def output_confirm(
+    task_id: str, payload: OutputConfirmRequest, db: DBSession
+) -> ApiResponse[OutputConfirmData]:
+    """验收通过智能体产出。即时级联。"""
+    data = TaskAppSvc(db).output_confirm(task_id, payload.user_id, payload.workspace_progress_ids)
+    return ApiResponse(data=data)
+
+
+@router.post("/{task_id}/output/reject", response_model=ApiResponse[OutputRejectData])
+def output_reject(
+    task_id: str,
+    payload: OutputRejectRequest,
+    db: DBSession,
+    background_tasks: BackgroundTasks,
+) -> ApiResponse[OutputRejectData]:
+    """退回智能体产出，重试或通知。
+
+    事务内仅更新 retry_count（飞书 3 秒超时内不阻塞）；
+    事务后异步触发 dispatch_task/shutdown/飞书通知。
+    """
+    data = TaskAppSvc(db).output_reject(task_id, payload.user_id, payload.feedback)
+    # 事务后异步：retry 的 dispatch_task + Redis / manual_intervention 的 shutdown + 通知
+    background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, payload.feedback)
+    return ApiResponse(data=data)

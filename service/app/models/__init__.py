@@ -16,8 +16,8 @@ model 类只有被 import 才会注册到 metadata。
   - workspaces          ✅ Story2  (app/models/workspace.py)
   - daily_records       ✅ Story3  (app/models/daily_record.py)
   - daily_tasks         ✅ Story3  (app/models/daily_task.py)
-  - workspace_progress  ⬜ Story4A
-  - agent_processes     ⬜ Story4A
+  - workspace_progress  ✅ Story4A (app/models/workspace_progress.py)
+  - agent_processes     ✅ Story4A (app/models/agent_process.py)
   - subtasks            ✅ Story3 起建（前置 INSERT）；S4B 扩后置+完成逻辑
   - status_change_log   ✅ Story2 起建（forward）；S5 扩 pause/resume/revert
   - weekly_records      ⬜ Story6

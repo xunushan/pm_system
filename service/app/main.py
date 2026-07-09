@@ -1,9 +1,10 @@
 """FastAPI 应用入口。
 
 挂载：
-  - /api/v1/*        REST API（Skill + H5 页面调用）
-  - /webhook/feishu/card  飞书卡片回调（入口 B）
-  - /health          健康检查
+  - /api/v1/*                  REST API（Skill + H5 页面调用）
+  - /api/callback/opencode/*   OpenCode 回调（产出/超时，doc/04 §3.12）
+  - /webhook/feishu/card       飞书卡片回调（入口 B）
+  - /health                    健康检查
 """
 
 from contextlib import asynccontextmanager
@@ -11,6 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app.api.callback import router as callback_router
 from app.api.v1.router import api_router
 from app.core.exceptions import AppError
 from app.schemas.common import ApiResponse
@@ -45,4 +47,5 @@ def health() -> dict:
 
 
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(callback_router, prefix="/api/callback")
 app.include_router(webhook_router, prefix="/webhook")

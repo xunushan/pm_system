@@ -1,22 +1,37 @@
-"""TaskAppSvc 单元测试：complete + post_confirm + subtask CRUD（Story4B）。
+"""TaskAppSvc 单元测试：Story4A + Story4B 方法。
 
-验证要点：
+Story4B 测试：complete + post_confirm + subtask CRUD
   - complete：标记完成 + 即时级联 + 审计（forward）
   - complete：已完成 -> 409 ConflictError；已暂停 -> 400 BadRequestError；不存在 -> 404
   - post_confirm：INSERT 后置 + 全取消不插入 + task 未完成拒绝 + 非 human executor 拒绝
   - subtask CRUD
+
+Story4A 测试：confirm_complete + output_confirm + output_reject + record_output + handle_timeout
+  - mock cascade/state_machine/opencode/feishu/redis
 """
+
+from datetime import date
+from unittest.mock import patch
+from uuid import uuid4
 
 import pytest
 
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.models.agent_process import AgentProcess
 from app.models.status_change_log import StatusChangeLog
 from app.models.subtask import Subtask
 from app.models.task import Task
+from app.models.workspace import Workspace
 from app.schemas.subtask import SubtaskCreateRequest, SubtaskPatchRequest
 from app.schemas.task import PostSubtaskInput
+from app.services import task_app_svc
 from app.services.task_app_svc import TaskAppSvc
 from tests._factory import make_tree
+
+_TODAY = date(2026, 7, 9)
+
+
+# ===== Story4B: 测试辅助 =====
 
 
 def _setup_active_task(db_session, *, executor="human", tasks_per_phase=1):
@@ -36,7 +51,39 @@ def _setup_active_task(db_session, *, executor="human", tasks_per_phase=1):
     return goal, themes, phases, task
 
 
-# ===== complete =====
+# ===== Story4A: 测试辅助 =====
+
+
+def _make_full_tree(db, *, theme_type="dev", task_executor=None):
+    """建 goal->theme->phase->task + workspace 树。
+
+    theme_type='dev' -> executor='agent'（智能体任务）。
+    """
+    goal, themes, phases = make_tree(db, n_themes=1, phases_per_theme=1, tasks_per_phase=2)
+    themes[0].type = theme_type
+    # 激活 phase
+    phases[0].status = "进行中"
+    phases[0].activated_at = _TODAY
+    # 创建 workspace
+    ws = Workspace(
+        id=str(uuid4()),
+        theme_id=themes[0].id,
+        path=f"data/workspaces/{uuid4().hex[:8]}",
+        managed=True,
+        status="已就绪",
+        type=theme_type,
+    )
+    db.add(ws)
+    db.flush()
+    # 设置 task executor
+    tasks = db.query(Task).filter_by(phase_id=phases[0].id).all()
+    for t in tasks:
+        t.executor = task_executor
+    db.flush()
+    return goal, themes, phases, ws, tasks
+
+
+# ===== Story4B: complete =====
 
 
 def test_complete_marks_task_and_cascades(db_session):
@@ -106,7 +153,7 @@ def test_complete_does_not_cascade_when_tasks_pending(db_session):
     assert phases[0].status == "进行中"
 
 
-# ===== post_confirm =====
+# ===== Story4B: post_confirm =====
 
 
 def test_post_confirm_inserts_post_subtasks(db_session):
@@ -200,7 +247,7 @@ def test_post_confirm_appends_to_existing_subtasks(db_session):
     assert post_subs[0].sort_order == 2  # 接在已有 sort_order=1 之后
 
 
-# ===== subtask CRUD =====
+# ===== Story4B: subtask CRUD =====
 
 
 def test_create_subtask(db_session):
@@ -349,3 +396,361 @@ def test_patch_subtask_in_progress_to_pending_rejects(db_session):
 
     with pytest.raises(BadRequestError):
         svc.patch_subtask(created.subtask_id, SubtaskPatchRequest(status="待执行"))
+
+
+# ===== Story4A: confirm_complete =====
+
+
+def test_confirm_complete_marks_task_done(db_session):
+    """confirm_complete 标记任务完成 + 审计 + 级联。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+
+    with (
+        patch.object(task_app_svc.state_machine, "validate_transition"),
+        patch.object(task_app_svc.cascade, "cascade_status"),
+        patch.object(task_app_svc, "emit"),
+        patch.object(task_app_svc.OpenCodeClient, "shutdown"),
+        patch.object(task_app_svc.OpenCodeClient, "start_agent_serve", return_value=10001),
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.confirm_complete(task.id, "user_001")
+
+    assert data.status == "已完成"
+    assert data.task_id == task.id
+    db_session.refresh(task)
+    assert task.status == "已完成"
+    assert task.completed_at is not None
+
+
+def test_confirm_complete_not_found(db_session):
+    """任务不存在 -> 404。"""
+    from app.core.exceptions import NotFoundError
+
+    svc = task_app_svc.TaskAppSvc(db_session)
+    with pytest.raises(NotFoundError):
+        svc.confirm_complete("nonexistent", "u1")
+
+
+def test_confirm_complete_already_done(db_session):
+    """任务已完成 -> 400。"""
+    from app.core.exceptions import BadRequestError
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    tasks[0].status = "已完成"
+    db_session.flush()
+
+    svc = task_app_svc.TaskAppSvc(db_session)
+    with pytest.raises(BadRequestError):
+        svc.confirm_complete(tasks[0].id, "u1")
+
+
+def test_confirm_complete_restarts_opencode_when_next_agent_task(
+    db_session,
+):
+    """有后续智能体任务 -> 重启 opencode serve。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    next_task = tasks[1]
+    next_task.status = "待执行"
+    next_task.executor = "agent"
+    db_session.flush()
+
+    with (
+        patch.object(task_app_svc.state_machine, "validate_transition"),
+        patch.object(task_app_svc.cascade, "cascade_status"),
+        patch.object(task_app_svc, "emit"),
+        patch.object(task_app_svc.OpenCodeClient, "shutdown") as mock_shutdown,
+        patch.object(
+            task_app_svc.OpenCodeClient, "start_agent_serve", return_value=10002
+        ) as mock_start,
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.confirm_complete(task.id, "u1")
+
+    assert data.opencode_restarted is True
+    assert data.next_agent_task == next_task.id
+    mock_shutdown.assert_called_once()
+    mock_start.assert_called_once()
+
+
+def test_confirm_complete_no_restart_when_no_next_agent(db_session):
+    """无后续智能体任务 -> 不重启 opencode。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="human")
+    task = tasks[0]
+
+    with (
+        patch.object(task_app_svc.state_machine, "validate_transition"),
+        patch.object(task_app_svc.cascade, "cascade_status"),
+        patch.object(task_app_svc, "emit"),
+        patch.object(task_app_svc.OpenCodeClient, "shutdown"),
+        patch.object(task_app_svc.OpenCodeClient, "start_agent_serve") as mock_start,
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.confirm_complete(task.id, "u1")
+
+    assert data.opencode_restarted is False
+    assert data.next_agent_task is None
+    mock_start.assert_not_called()
+
+
+# ===== Story4A: output_confirm =====
+
+
+def test_output_confirm_marks_task_and_pre_subtasks_done(db_session):
+    """output_confirm 标记任务完成 + 前置子任务完成 + 级联。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    # 添加前置子任务
+    sub = Subtask(
+        id=str(uuid4()),
+        task_id=task.id,
+        sort_order=1,
+        name="前置1",
+        type="前置",
+        status="待执行",
+    )
+    db_session.add(sub)
+    db_session.flush()
+
+    with (
+        patch.object(task_app_svc.state_machine, "validate_transition"),
+        patch.object(task_app_svc.cascade, "cascade_status"),
+        patch.object(task_app_svc, "emit"),
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_confirm(task.id, "u1", [])
+
+    assert data.status == "已完成"
+    db_session.refresh(task)
+    db_session.refresh(sub)
+    assert task.status == "已完成"
+    assert sub.status == "已完成"
+    assert sub.completed_at is not None
+
+
+def test_output_confirm_not_found(db_session):
+    """任务不存在 -> 404。"""
+    from app.core.exceptions import NotFoundError
+
+    svc = task_app_svc.TaskAppSvc(db_session)
+    with pytest.raises(NotFoundError):
+        svc.output_confirm("nonexistent", "u1", [])
+
+
+# ===== Story4A: output_reject =====
+
+
+def test_output_reject_retry_under_limit(db_session):
+    """retry_count < 3 -> 重试。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 1
+    db_session.flush()
+
+    # 添加 running agent_process
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "dispatch_task"),
+        patch.object(task_app_svc, "set_task_timeout"),
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "需要修改")
+
+    assert data.action == "retry"
+    assert data.retry_count == 2
+    assert data.max_retry == 3
+    assert data.async_triggered is True
+    db_session.refresh(task)
+    assert task.status == "待执行"  # 不改状态
+    assert task.retry_count == 2
+
+
+def test_output_reject_at_limit_manual_intervention(db_session):
+    """retry_count >= 3 -> manual_intervention。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 3
+    db_session.flush()
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "shutdown", return_value=True),
+        patch.object(task_app_svc.FeishuClient, "send_text"),
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "多次不过")
+
+    assert data.action == "manual_intervention"
+    assert data.retry_count == 3
+    assert data.opencode_stopped is True
+    assert data.workspace_path is not None
+    db_session.refresh(task)
+    assert task.status == "待执行"  # 3次不通过不改状态
+
+
+def test_output_reject_not_found(db_session):
+    """任务不存在 -> 404。"""
+    from app.core.exceptions import NotFoundError
+
+    svc = task_app_svc.TaskAppSvc(db_session)
+    with pytest.raises(NotFoundError):
+        svc.output_reject("nonexistent", "u1", "fb")
+
+
+# ===== Story4A: record_output =====
+
+
+def test_record_output_creates_workspace_progress(db_session):
+    """record_output 记录 workspace_progress + DEL 超时 + 发卡片。"""
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+
+    outputs = [
+        {"file_path": "docs/schema-v1.md", "file_type": "design"},
+        {"file_path": "src/schema.py", "file_type": "code"},
+    ]
+
+    with (
+        patch.object(task_app_svc, "del_task_timeout"),
+        patch.object(task_app_svc.FeishuClient, "send_card"),
+        patch.object(task_app_svc.FeishuClient, "send_file"),
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.record_output(task.id, ws.id, outputs)
+
+    assert data.received is True
+    assert data.progress_count == 2
+
+    from app.models.workspace_progress import WorkspaceProgress
+
+    wps = db_session.query(WorkspaceProgress).filter_by(task_id=task.id).all()
+    assert len(wps) == 2
+    assert wps[0].file_path == "docs/schema-v1.md"
+    assert wps[0].file_type == "design"
+
+
+# ===== Story4A: handle_timeout =====
+
+
+def test_handle_timeout_sends_alert(db_session):
+    """handle_timeout 发飞书告警。"""
+    with patch.object(task_app_svc.FeishuClient, "send_text") as mock_send:
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.handle_timeout("task_001", "ws_001")
+
+    assert data.alert_sent is True
+    mock_send.assert_called_once()
+
+
+# ===== trigger_reject_async（事务后异步触发）=====
+
+
+def test_trigger_reject_async_retry_path(db_session, monkeypatch):
+    """trigger_reject_async retry 路径：dispatch_task + set_task_timeout 在后台执行。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 1
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    # patch SessionLocal -> 测试 engine
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "dispatch_task") as mock_dispatch,
+        patch.object(task_app_svc, "set_task_timeout") as mock_set_timeout,
+    ):
+        task_app_svc.TaskAppSvc.trigger_reject_async(task.id, "需要修改")
+
+    mock_dispatch.assert_called_once()
+    mock_set_timeout.assert_called_once()
+
+
+def test_trigger_reject_async_manual_intervention_path(db_session, monkeypatch):
+    """trigger_reject_async manual_intervention 路径：shutdown + 飞书通知在后台执行。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 3
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "shutdown", return_value=True) as mock_shutdown,
+        patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
+    ):
+        task_app_svc.TaskAppSvc.trigger_reject_async(task.id, "多次不过")
+
+    mock_shutdown.assert_called_once()
+    mock_send.assert_called_once()
+
+
+def test_output_reject_no_sync_http_in_retry(db_session, monkeypatch):
+    """output_reject retry 路径不同步调 dispatch_task（铁律 §3#4 飞书 3 秒超时）。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 0
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    # output_reject 不应同步调 dispatch_task（只在 trigger_reject_async 后台调）
+    with patch.object(task_app_svc.OpenCodeClient, "dispatch_task") as mock_dispatch:
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "fb")
+
+    assert data.action == "retry"
+    # output_reject 本身不同步调 dispatch_task
+    mock_dispatch.assert_not_called()
+
+
+def test_output_reject_no_sync_http_in_manual_intervention(db_session, monkeypatch):
+    """output_reject manual_intervention 路径不同步调 shutdown/send_text。"""
+    from sqlalchemy.orm import sessionmaker
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
+    task = tasks[0]
+    task.retry_count = 3
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "shutdown") as mock_shutdown,
+        patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
+    ):
+        svc = task_app_svc.TaskAppSvc(db_session)
+        data = svc.output_reject(task.id, "u1", "fb")
+
+    assert data.action == "manual_intervention"
+    # output_reject 本身不同步调 shutdown / send_text
+    mock_shutdown.assert_not_called()
+    mock_send.assert_not_called()
