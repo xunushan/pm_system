@@ -12,6 +12,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -30,6 +31,7 @@ class Phase(Base):
             name="ck_phases_status",
         ),
         UniqueConstraint("theme_id", "sort_order", name="uq_phases_theme_sort"),
+        Index("idx_phases_theme", "theme_id", "sort_order"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

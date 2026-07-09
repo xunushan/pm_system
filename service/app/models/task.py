@@ -13,6 +13,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -36,6 +37,8 @@ class Task(Base):
             name="ck_tasks_executor",
         ),
         UniqueConstraint("phase_id", "sort_order", name="uq_tasks_phase_sort"),
+        Index("idx_tasks_phase", "phase_id", "sort_order"),
+        Index("idx_tasks_status", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

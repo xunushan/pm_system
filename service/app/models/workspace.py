@@ -8,7 +8,7 @@ managed/path 在 Story2 卡片 A 设置；激活后不能改 managed（避免破
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -25,6 +25,7 @@ class Workspace(Base):
             "type IN ('learning','research','source','dev','survey')",
             name="ck_workspaces_type",
         ),
+        Index("idx_workspaces_theme", "theme_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

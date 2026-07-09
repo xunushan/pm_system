@@ -12,6 +12,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -29,6 +30,7 @@ class AgentProcess(Base):
             "status IN ('running','crashed','stopped')",
             name="ck_agent_processes_status",
         ),
+        Index("idx_agent_processes_status", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
