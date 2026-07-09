@@ -265,7 +265,7 @@ class DailyAppSvc:
             if not task_ids:
                 return
 
-            client = OpenCodeClient()
+            client = OpenCodeClient(db)
 
             # 前置子任务 -> dispatch
             pre_subs = (
