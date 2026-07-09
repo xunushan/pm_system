@@ -25,19 +25,21 @@ from sqlalchemy.orm import Session
 from app.clients.feishu import (
     FeishuClient,
     build_deadline_reminder_card,
+    build_phase_linking_card,
     build_plan_reminder_card,
     build_start_date_reminder_card,
     build_summary_reminder_card,
 )
 from app.config import settings
-from app.core.times import now_utc_naive
+from app.core.redis_client import get_redis
+from app.core.times import now_utc_naive, parse_iso_naive
 from app.db.session import SessionLocal
 from app.models.daily_record import DailyRecord
 from app.models.goal import Goal
 from app.models.phase import Phase
 from app.supervisor import linking
+from app.supervisor.constants import DEFAULT_CHAT_ID
 from app.supervisor.event_bus import LINKING_PUSHED_KEY, NOTIFIED_KEY
-from app.supervisor.handlers import _DEFAULT_CHAT_ID
 
 logger = logging.getLogger(__name__)
 
@@ -45,11 +47,6 @@ _scheduler: BackgroundScheduler | None = None
 
 # 衔接 24h 未响应阈值
 _LINKING_TIMEOUT = timedelta(hours=24)
-
-
-def _get_redis() -> redis.Redis:
-    """创建 Redis 客户端（复用 task_timeout 模式）。"""
-    return redis.from_url(settings.redis_url, decode_responses=True)
 
 
 def _is_notified(r: redis.Redis, kind: str, entity_id: str, today: date) -> bool:
@@ -102,7 +99,7 @@ def check_start_date(
             else today.isoformat(),
         )
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
             _mark_notified(redis_client, "start_date", goal.id, today)
             pushed += 1
         except Exception:  # noqa: BLE001
@@ -143,7 +140,7 @@ def check_deadline(
             h5_base_url=settings.h5_base_url,
         )
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
             _mark_notified(redis_client, "deadline", phase.id, today)
             pushed += 1
         except Exception:  # noqa: BLE001
@@ -176,7 +173,7 @@ def check_unconfirmed_plan(
 
     card = build_plan_reminder_card(today.isoformat())
     try:
-        feishu.send_card(_DEFAULT_CHAT_ID, card)
+        feishu.send_card(DEFAULT_CHAT_ID, card)
         _mark_notified(redis_client, "unconfirmed_plan", entity_id, today)
         pushed += 1
     except Exception:  # noqa: BLE001
@@ -209,7 +206,7 @@ def check_missing_summary(
 
     card = build_summary_reminder_card(today.isoformat())
     try:
-        feishu.send_card(_DEFAULT_CHAT_ID, card)
+        feishu.send_card(DEFAULT_CHAT_ID, card)
         _mark_notified(redis_client, "missing_summary", entity_id, today)
         pushed += 1
     except Exception:  # noqa: BLE001
@@ -253,16 +250,14 @@ def check_linking_unresponded(
         # 检查推送时间是否 > 24h
         key = LINKING_PUSHED_KEY.format(phase_id=phase.id)
         pushed_at_str = redis_client.get(key)
-        if not pushed_at_str:
-            # 无推送记录（可能进程重启丢队列），直接推一次
-            pass
-        else:
+        if pushed_at_str:
             try:
-                pushed_at = _parse_iso(pushed_at_str)
+                pushed_at = parse_iso_naive(pushed_at_str)
                 if now - pushed_at < _LINKING_TIMEOUT:
                     continue  # 还没到 24h，跳过
             except (ValueError, TypeError):
                 logger.warning("check_linking_unresponded: 无法解析推送时间 %s", pushed_at_str)
+        # 无推送记录（可能进程重启丢队列）-> 继续推一次
 
         # 每项每天最多 1 次（去重）
         if _is_notified(redis_client, "linking_unresp", phase.id, today):
@@ -271,8 +266,6 @@ def check_linking_unresponded(
         # 再推一次衔接卡片
         suggested_deadline = linking.compute_suggested_deadline(db, next_phase)
         deadline_str = suggested_deadline.isoformat() if suggested_deadline else ""
-        from app.clients.feishu import build_phase_linking_card
-
         card = build_phase_linking_card(
             completed_phase_name=phase.name,
             next_phase_id=next_phase.id,
@@ -280,7 +273,7 @@ def check_linking_unresponded(
             suggested_deadline=deadline_str,
         )
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
             _mark_notified(redis_client, "linking_unresp", phase.id, today)
             # 更新推送时间
             redis_client.set(key, now.isoformat(), ex=86400 * 2)
@@ -288,16 +281,6 @@ def check_linking_unresponded(
         except Exception:  # noqa: BLE001
             logger.exception("check_linking_unresponded: 推送失败 phase=%s", phase.id)
     return pushed
-
-
-def _parse_iso(s: str):
-    """解析 ISO 时间字符串（兼容 naive/aware）。"""
-    from datetime import datetime
-
-    dt = datetime.fromisoformat(s)
-    if dt.tzinfo is not None:
-        dt = dt.replace(tzinfo=None)
-    return dt
 
 
 # ---- scheduler 生命周期 ----
@@ -321,7 +304,7 @@ def start_scheduler() -> None:
     def _wrap(check_fn):
         def _run():
             db = SessionLocal()
-            r = _get_redis()
+            r = get_redis()
             try:
                 check_fn(db, r)
             except Exception:  # noqa: BLE001

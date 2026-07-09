@@ -25,27 +25,20 @@ from app.clients.feishu import (
     build_phase_linking_card,
     build_theme_completed_card,
 )
-from app.config import settings
+from app.core.redis_client import get_redis
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
 from app.models.goal import Goal
 from app.models.phase import Phase
 from app.models.theme import Theme
 from app.supervisor import linking
+from app.supervisor.constants import DEFAULT_CHAT_ID
 from app.supervisor.event_bus import LINKING_PUSHED_KEY
 
 logger = logging.getLogger(__name__)
 
 # 衔接推送记录 TTL（2 天，覆盖 24h 巡检窗口）
 _LINKING_TTL = 86400 * 2
-
-# 默认飞书 chat_id（单用户场景占位，正式部署从配置/用户表取）
-_DEFAULT_CHAT_ID = "chat_id_placeholder"
-
-
-def _get_redis() -> redis.Redis:
-    """创建 Redis 客户端（复用 task_timeout 模式，每次新建连接）。"""
-    return redis.from_url(settings.redis_url, decode_responses=True)
 
 
 def on_phase_completed(
@@ -68,7 +61,7 @@ def on_phase_completed(
         db = SessionLocal()
     own_redis = redis_client is None
     if own_redis:
-        redis_client = _get_redis()
+        redis_client = get_redis()
     if feishu is None:
         feishu = FeishuClient()
 
@@ -97,7 +90,7 @@ def on_phase_completed(
             suggested_deadline=deadline_str,
         )
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
         except Exception:  # noqa: BLE001
             logger.exception("on_phase_completed: 推衔接卡片失败 phase=%s", phase_id)
 
@@ -155,7 +148,7 @@ def on_theme_completed(
             other_themes=[{"theme_id": t.id, "name": t.name, "type": t.type} for t in other_themes],
         )
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
         except Exception:  # noqa: BLE001
             logger.exception("on_theme_completed: 推卡片失败 theme=%s", theme_id)
         logger.info("on_theme_completed: 专题完成卡片已推送 theme=%s", theme_id)
@@ -184,7 +177,7 @@ def on_goal_completed(
 
         card = build_goal_completed_card(goal.name)
         try:
-            feishu.send_card(_DEFAULT_CHAT_ID, card)
+            feishu.send_card(DEFAULT_CHAT_ID, card)
         except Exception:  # noqa: BLE001
             logger.exception("on_goal_completed: 推通知卡片失败 goal=%s", goal_id)
         logger.info("on_goal_completed: 目标完成通知已推送 goal=%s", goal_id)

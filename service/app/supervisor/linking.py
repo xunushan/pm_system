@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.times import now_utc_naive
 from app.models.goal import Goal
 from app.models.phase import Phase
+from app.models.task import Task
 from app.models.theme import Theme
 
 # 无 time_range_end 时，每阶段默认天数
@@ -81,8 +82,6 @@ def compute_suggested_deadline(db: Session, next_phase: Phase) -> date | None:
         days_per_phase = _DEFAULT_DAYS_PER_PHASE
 
     # 结合任务数微调：任务多则多给 1 天
-    from app.models.task import Task
-
     task_count = db.query(Task).filter(Task.phase_id == next_phase.id).count()
     if task_count > 5:
         days_per_phase += 1
