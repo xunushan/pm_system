@@ -149,6 +149,9 @@ class DailyAppSvc:
         """事务后异步写 daily.md 快照（独立 session，BackgroundTasks 调用）。
 
         从 daily_id 反查统计数据 -> 写入 vault/daily/{date}.md。
+
+        user_id 硬编码为 "system"：当前系统单用户，daily_records 无 user_id 列，
+        多用户场景需扩展 daily_records 增加 user_id 后从此传入。
         """
         db = SessionLocal()
         try:

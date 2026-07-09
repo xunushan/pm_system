@@ -40,6 +40,7 @@ from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.task_timeout import del_task_timeout, set_task_timeout
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
+from app.models.daily_record import DailyRecord
 from app.models.subtask import Subtask
 from app.models.task import Task
 from app.models.workspace import Workspace
@@ -64,6 +65,7 @@ from app.schemas.task import (
     TaskPatchStatusData,
     TimeoutAlertData,
 )
+from app.services.daily_app_svc import DailyAppSvc
 from app.supervisor.event_bus import emit
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,9 @@ MAX_RETRY = 3
 
 # 日终异议 revert 系统默认 reason（D18 裁决：不弹窗，系统自动填，满足 D6 reason 必填）
 REVERT_REASON = "日终异议-标记未完成"
+
+# 已暂停任务不纳入日终异议（doc/02 §2.16：暂停态不纳入计划；暂停/恢复走 S9 board）
+PAUSED_NOT_IN_DISPUTE = "已暂停任务不在日终异议范围内（暂停/恢复走 S9 board 状态变更）"
 
 
 class TaskAppSvc:
@@ -179,6 +184,9 @@ class TaskAppSvc:
         if status == "已完成":
             if old_status == "已完成":
                 raise ConflictError(f"任务已完成: {task_id}")
+            # 已暂停任务不纳入日终异议（暂停/恢复走 S9 board 状态变更）
+            if old_status == "已暂停":
+                raise BadRequestError(PAUSED_NOT_IN_DISPUTE)
             try:
                 state_machine.validate_transition("task", old_status, "已完成", None)
             except ValueError as e:
@@ -210,6 +218,9 @@ class TaskAppSvc:
 
         # ---- revert：已完成->待执行 ----
         if status == "待执行":
+            # 已暂停任务不纳入日终异议（暂停/恢复走 S9 board 状态变更）
+            if old_status == "已暂停":
+                raise BadRequestError(PAUSED_NOT_IN_DISPUTE)
             # 系统自动填默认 reason（D18 裁决：不弹窗，满足 D6 reason 必填）
             try:
                 state_machine.validate_transition(
@@ -656,9 +667,6 @@ class TaskAppSvc:
         """
         db = SessionLocal()
         try:
-            from app.models.daily_record import DailyRecord
-            from app.services.daily_app_svc import DailyAppSvc
-
             # 查 daily_record 的日期，用该日期重新统计
             daily = db.get(DailyRecord, daily_id) if daily_id else None
             date_ = daily.date if daily else None

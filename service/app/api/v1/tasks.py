@@ -128,13 +128,12 @@ def patch_task_status(
     task_id: str,
     payload: TaskPatchStatusRequest,
     db: DBSession,
-    background_tasks: BackgroundTasks,
 ) -> ApiResponse[TaskPatchStatusData]:
     """日终异议双向状态变更：待执行↔已完成。
 
     触发即时级联（forward 完成级联 / revert 回退级联）。
     revert 由系统自动填默认 reason（D18 裁决：不弹窗）。
-    事务后异步刷卡片（webhook 层调 feishu update_card）。
+    事务后异步刷卡片由 webhook 层 BackgroundTasks 负责（API 层不需要）。
     """
     data = TaskAppSvc(db).patch_status(
         task_id=task_id,

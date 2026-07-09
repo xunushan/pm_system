@@ -296,6 +296,38 @@ def test_patch_invalid_status_400(client, db_session):
     assert resp.json()["code"] == 1002
 
 
+def test_patch_forward_paused_rejects(client, db_session):
+    """已暂停任务 forward -> 400（暂停态不通过异议直接完成）。"""
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=0
+    )
+    tasks[0].status = "已暂停"
+    db_session.flush()
+
+    resp = client.patch(
+        f"{_API}/tasks/{tasks[0].id}",
+        json={"status": "已完成"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 1002
+
+
+def test_patch_revert_paused_rejects(client, db_session):
+    """已暂停任务 revert -> 400（暂停态不通过异议论退）。"""
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=0
+    )
+    tasks[0].status = "已暂停"
+    db_session.flush()
+
+    resp = client.patch(
+        f"{_API}/tasks/{tasks[0].id}",
+        json={"status": "待执行"},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 1002
+
+
 # ===== GET /stats/daily =====
 
 
