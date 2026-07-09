@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.exceptions import BadRequestError, ConflictError, NotFoundError, QuotaExceededError
 from app.models.phase import Phase
 from app.models.status_change_log import StatusChangeLog
 from app.models.workspace import Workspace
@@ -56,13 +56,13 @@ def test_confirm_activates_first_phase_and_cascades(db_session):
 
 
 def test_confirm_quota_exceeded_returns_409(db_session):
-    """3 个进行中 + 本次 1 -> 超 3 上限 -> 409。"""
+    """3 个进行中 + 本次 1 -> 超 3 上限 -> 409(1004 并发超限)。"""
     goal, themes, phases = make_tree(db_session, n_themes=4, phases_per_theme=1)
     for p in phases[:3]:
         p.status = "进行中"
     db_session.flush()
 
-    with pytest.raises(ConflictError):
+    with pytest.raises(QuotaExceededError):
         _confirm(
             db_session,
             goal.id,

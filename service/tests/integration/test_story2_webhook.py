@@ -43,7 +43,7 @@ def test_webhook_schedule_confirm_activates(client, db_session):
 
 
 def test_webhook_schedule_confirm_quota_409(client, db_session):
-    """webhook 走同样名额校验 -> 409。"""
+    """webhook 走同样名额校验 -> 409(1004 并发超限)。"""
     goal, themes, phases = make_tree(db_session, n_themes=4, phases_per_theme=1)
     for p in phases[:3]:
         p.status = "进行中"
@@ -55,7 +55,7 @@ def test_webhook_schedule_confirm_quota_409(client, db_session):
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 409
-    assert resp.json()["code"] == 1003
+    assert resp.json()["code"] == 1004
 
 
 def test_webhook_unknown_action_returns_noop(client):

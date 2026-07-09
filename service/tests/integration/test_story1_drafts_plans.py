@@ -8,13 +8,13 @@
 
 from datetime import timedelta
 
+from app.core.times import now_utc_naive
 from app.db.session import get_db
 from app.models.draft import Draft
 from app.models.goal import Goal
 from app.models.phase import Phase
 from app.models.task import Task
 from app.models.theme import Theme
-from app.services.draft_app_svc import now_utc_naive
 
 _API = "/api/v1"
 

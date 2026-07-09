@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session
 
 from app.clients.workspace import is_path_valid
 from app.core import audit, cascade, state_machine
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.exceptions import (
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    QuotaExceededError,
+)
 from app.core.times import now_utc_naive
 from app.models.workspace import Workspace
 from app.repositories.goal import GoalRepository
@@ -47,16 +52,25 @@ class ScheduleAppSvc:
         """确认调度：多选专题 -> 激活各自第1个未开始阶段 + 即时级联 + 审计。
 
         事务内完成所有 DB 写；工作空间初始化（managed=1）由路由层异步调度。
+        managed=0 的 path 存在性校验（文件系统 stat=IO）前置到事务外（铁律 §3#3）。
         """
+        # 0. managed=0 path 存在性校验（事务外，纯入参校验，不依赖 DB）
+        for item in items:
+            if not item.managed:
+                if not item.path:
+                    raise BadRequestError(f"专题 {item.theme_id} managed=0 时 path 必填")
+                if not is_path_valid(item.path):
+                    raise BadRequestError(f"path 不存在: {item.path}")
+
         # 1. 校验 goal 存在
         goal = self.goal_repo.get(goal_id)
         if goal is None:
             raise NotFoundError(f"目标不存在: {goal_id}")
 
-        # 全局进行中 + 本次 <= 3
+        # 全局进行中 + 本次 <= 3（doc/04 2.3: 1004 并发超限）
         active_count = self.phase_repo.count_by_status("进行中")
         if active_count + len(items) > MAX_ACTIVE_PHASES:
-            raise ConflictError(
+            raise QuotaExceededError(
                 f"进行中阶段 {active_count} + 本次 {len(items)} 超上限 {MAX_ACTIVE_PHASES}"
             )
 
@@ -139,18 +153,14 @@ class ScheduleAppSvc:
         if item.deadline is None:
             raise BadRequestError(f"专题 {item.theme_id} 的 deadline 必填")
 
-        # managed/path
+        # managed/path（path 存在性已在 confirm 开头事务外前置校验）
         workspace_id = str(uuid4())
         if item.managed:
             # managed=1：path 系统生成（规则：data/workspaces/{workspace_id}）
             path = f"data/workspaces/{workspace_id}"
             ws_status = "未初始化"
         else:
-            # managed=0：path 必填且校验存在性（不创建任何文件）
-            if not item.path:
-                raise BadRequestError(f"专题 {item.theme_id} managed=0 时 path 必填")
-            if not is_path_valid(item.path):
-                raise BadRequestError(f"path 不存在: {item.path}")
+            # managed=0：path 已在事务外校验存在性，此处直接用
             path = item.path
             ws_status = "已就绪"
 

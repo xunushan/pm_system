@@ -106,7 +106,7 @@ def test_confirm_managed1_init_async(client, db_session, monkeypatch, tmp_path):
 
 
 def test_confirm_quota_exceeded_returns_409(client, db_session):
-    """3 进行中 + 1 -> 409(1003)。"""
+    """3 进行中 + 1 -> 409(1004 并发超限)。"""
     goal, themes, phases = make_tree(db_session, n_themes=4, phases_per_theme=1)
     for p in phases[:3]:
         p.status = "进行中"
@@ -118,7 +118,7 @@ def test_confirm_quota_exceeded_returns_409(client, db_session):
     )
     resp = client.post(f"{_API}/schedules/confirm", json=body)
     assert resp.status_code == 409
-    assert resp.json()["code"] == 1003
+    assert resp.json()["code"] == 1004
 
 
 def test_confirm_reactivate_active_theme_returns_409(client, db_session):
@@ -194,3 +194,32 @@ def test_confirm_managed0_does_not_create_files(client, db_session, tmp_path):
     # 目录内容不变（无 README/.gitkeep）
     assert not (existing / "README.md").exists()
     assert not (existing / ".gitkeep").exists()
+
+
+def test_confirm_managed0_path_not_exists_aborts_before_db_write(client, db_session):
+    """path 不存在 -> 1002，且校验在事务外（无 phase 更新/无 workspace 创建）。
+
+    验证铁律 §3#3：path 存在性校验（isdir=IO）前置到事务外，失败时 DB 零写入。
+    """
+    goal, themes, phases = make_tree(db_session, phases_per_theme=1)
+    db_session.flush()
+    phase_before = phases[0].status
+
+    body = _confirm_body(
+        goal.id,
+        [
+            {
+                "theme_id": themes[0].id,
+                "managed": False,
+                "path": "/nonexistent-preflight-999",
+                "deadline": "2026-07-15",
+            }
+        ],
+    )
+    resp = client.post(f"{_API}/schedules/confirm", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 1002
+    # DB 零写入：phase 状态未变、无 workspace
+    db_session.expire_all()
+    assert phases[0].status == phase_before
+    assert db_session.query(Workspace).count() == 0
