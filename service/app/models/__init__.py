@@ -9,10 +9,10 @@ model 类只有被 import 才会注册到 metadata。
 
 实现进度（按 Story 推进）：
   - goals               ✅ Story1  (app/models/goal.py)
-  - themes              ⬜ Story1
-  - phases              ⬜ Story1
-  - tasks               ⬜ Story1
-  - drafts              ⬜ Story1
+  - themes              ✅ Story1  (app/models/theme.py)
+  - phases              ✅ Story1  (app/models/phase.py)
+  - tasks               ✅ Story1  (app/models/task.py)
+  - drafts              ✅ Story1  (app/models/draft.py)
   - workspaces          ⬜ Story2
   - daily_records       ⬜ Story3
   - daily_tasks         ⬜ Story3
