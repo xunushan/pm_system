@@ -11,12 +11,13 @@ content 契约（plan 态）：嵌套结构 `{"goal":{...}, "themes":[{"phases":
 """
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import BadRequestError, ConflictError, DraftExpiredError, NotFoundError
+from app.core.times import now_utc_naive
 from app.models.draft import Draft
 from app.repositories.draft import DraftRepository
 from app.schemas.draft import (
@@ -26,15 +27,6 @@ from app.schemas.draft import (
 )
 
 _DRAFT_STORY_TYPES = {"plan", "schedule", "daily", "weekly", "edit", "config"}
-
-
-def now_utc_naive() -> datetime:
-    """当前 UTC 时间（naive，与 SQLite 存储的 naive datetime 一致）。
-
-    `datetime.utcnow()` 在 Python 3.12+ 弃用，改用 `datetime.now(timezone.utc)`；
-    SQLite 存 naive，故 strip tzinfo 后比较，避免 tz-aware vs naive 比较 TypeError。
-    """
-    return datetime.now(UTC).replace(tzinfo=None)
 
 
 def raise_if_draft_expired(draft: Draft) -> None:

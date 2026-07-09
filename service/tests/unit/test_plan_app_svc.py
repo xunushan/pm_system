@@ -182,7 +182,7 @@ def test_confirm_expired_draft_raises_expired(db_session):
     """P2-3: draft 过期 -> DraftExpiredError (code 1007)。"""
     from datetime import timedelta
 
-    from app.services.draft_app_svc import now_utc_naive
+    from app.core.times import now_utc_naive
 
     draft_id = _seed_draft(db_session)
     draft = db_session.get(Draft, draft_id)

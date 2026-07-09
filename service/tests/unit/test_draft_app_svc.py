@@ -5,8 +5,9 @@ from datetime import timedelta
 import pytest
 
 from app.core.exceptions import BadRequestError, ConflictError, DraftExpiredError, NotFoundError
+from app.core.times import now_utc_naive
 from app.models.draft import Draft
-from app.services.draft_app_svc import DraftAppSvc, now_utc_naive
+from app.services.draft_app_svc import DraftAppSvc
 
 _CONTENT = {"goal": {"name": "G"}, "themes": []}
 

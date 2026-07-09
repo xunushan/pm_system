@@ -13,13 +13,13 @@ model 类只有被 import 才会注册到 metadata。
   - phases              ✅ Story1  (app/models/phase.py)
   - tasks               ✅ Story1  (app/models/task.py)
   - drafts              ✅ Story1  (app/models/draft.py)
-  - workspaces          ⬜ Story2
+  - workspaces          ✅ Story2  (app/models/workspace.py)
   - daily_records       ⬜ Story3
   - daily_tasks         ⬜ Story3
   - workspace_progress  ⬜ Story4A
   - agent_processes     ⬜ Story4A
   - subtasks            ⬜ Story4B
-  - status_change_log   ⬜ Story5
+  - status_change_log   ✅ Story2 起建（forward）；S5 扩 pause/resume/revert
   - weekly_records      ⬜ Story6
   - subtask_templates   ⬜ Story7
 """

@@ -18,3 +18,6 @@ class PhaseRepository(BaseRepository[Phase]):
 
     def count(self) -> int:
         return self.db.query(Phase).count()
+
+    def count_by_status(self, status: str) -> int:
+        return self.db.query(Phase).filter(Phase.status == status).count()

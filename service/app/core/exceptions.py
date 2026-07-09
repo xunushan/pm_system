@@ -11,6 +11,7 @@ from app.schemas.common import (
     CODE_DRAFT_EXPIRED,
     CODE_INTERNAL,
     CODE_NOT_FOUND,
+    CODE_QUOTA_EXCEEDED,
 )
 
 
@@ -32,6 +33,13 @@ class NotFoundError(AppError):
 class ConflictError(AppError):
     def __init__(self, message: str = "状态冲突") -> None:
         super().__init__(CODE_CONFLICT, message, http_status=409)
+
+
+class QuotaExceededError(AppError):
+    """并发超限（doc/04 2.3: 1004，如全局进行中阶段>3）。"""
+
+    def __init__(self, message: str = "并发超限") -> None:
+        super().__init__(CODE_QUOTA_EXCEEDED, message, http_status=409)
 
 
 class BadRequestError(AppError):
