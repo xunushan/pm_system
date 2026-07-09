@@ -21,12 +21,18 @@ from app.webhook.feishu_card import router as webhook_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # TODO(Story8): 启动 Supervisor 定时巡检（APScheduler）
-    #   if settings.supervisor_enabled:
-    #       from app.supervisor.scheduler import start_scheduler
-    #       start_scheduler()
+    # 启动 Supervisor：事件总线 dispatcher + 定时巡检 scheduler（Story8）
+    from app.config import settings
+    from app.supervisor.event_bus import start_dispatcher, stop_dispatcher
+    from app.supervisor.scheduler import start_scheduler, stop_scheduler
+
+    start_dispatcher()
+    if settings.supervisor_enabled:
+        start_scheduler()
     yield
-    # TODO(Story8): 关闭 Scheduler
+    # 关闭 Supervisor
+    stop_scheduler()
+    stop_dispatcher()
 
 
 app = FastAPI(title="目标管理系统 Service", version="0.1.0", lifespan=lifespan)

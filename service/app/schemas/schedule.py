@@ -42,3 +42,26 @@ class ScheduleConfirmData(BaseModel):
     activated_phases: list[ActivatedPhase]
     scheduled_start_date: date | None
     bitable_synced: bool = False
+
+
+# ---- Story8: 阶段衔接激活（doc/04 3.3 POST /schedules/activate）----
+
+
+class ScheduleActivateRequest(BaseModel):
+    """POST /schedules/activate 请求（Supervisor 衔接激活，doc/04 约 283-289）。"""
+
+    phase_id: str
+    deadline: date
+    user_id: str = "supervisor"
+
+
+class ScheduleActivateData(BaseModel):
+    """POST /schedules/activate 响应（doc/04 约 295-302）。"""
+
+    phase_id: str
+    name: str
+    status: str
+    deadline: date
+    workspace_id: str
+    workspace_managed: bool
+    workspace_status: str
