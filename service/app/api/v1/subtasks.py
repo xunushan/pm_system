@@ -2,6 +2,8 @@
 
 前置/后置只服务人执行任务，智能体执行（opencode run）。
 后置和完成脱钩：完成即时级联，后置可选收尾，可全取消。
+
+S3 已建 subtasks 表 + 前置 INSERT（confirm 时落库）；subtasks 路由 CRUD 留 S4B。
 """
 
 from fastapi import APIRouter

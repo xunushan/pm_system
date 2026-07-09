@@ -1,0 +1,339 @@
+"""DailyAppSvc：当日计划推送（Story3 核心服务）。
+
+两个方法：
+  - get_plans_pool：只读预查询（已激活阶段+排除已暂停），供 pm-daily LLM 决策。
+  - confirm：事务5步 INSERT daily_records/daily_tasks/subtasks + 事务后异步 opencode。
+
+铁律（CLAUDE.md §3）：
+  - Service 不调 LLM（§3#1）：pool 只查、confirm 只落库+异步触发。
+  - executor 推断是 Skill 职责：pool 返回 theme_type 供 pm-daily LLM 推断。
+  - 事务内禁 IO/HTTP（§3#3）：opencode dispatch 事务后异步。
+  - 飞书 3 秒超时（§3#4）：confirm 仅 DB 写后立即返回，opencode 异步。
+  - 无 drafts（§3#6）：确认前数据在卡片，确认时直接写库。
+
+theme_type -> executor 映射（doc/05 §5.4，确定性规则，非 LLM 推断）：
+  learning/research/source -> human
+  dev/survey -> agent
+  Service 用此映射确定 pre_subtask 锚点 task 和 agent serve 触发，不写 tasks.executor。
+"""
+
+import logging
+from datetime import date, timedelta
+from uuid import uuid4
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.clients.opencode import OpenCodeClient
+from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.times import now_utc_naive
+from app.db.session import SessionLocal
+from app.models.daily_record import DailyRecord
+from app.models.daily_task import DailyTask
+from app.models.phase import Phase
+from app.models.subtask import Subtask
+from app.models.task import Task
+from app.models.theme import Theme
+from app.models.workspace import Workspace
+from app.repositories.daily_record import DailyRecordRepository
+from app.repositories.daily_task import DailyTaskRepository
+from app.repositories.phase import PhaseRepository
+from app.repositories.subtask import SubtaskRepository
+from app.repositories.task import TaskRepository
+from app.repositories.theme import ThemeRepository
+from app.schemas.daily import (
+    ActivePhaseInfo,
+    DailyConfirmData,
+    DailyPoolData,
+    PendingTaskInfo,
+    PreSubtaskInput,
+    YesterdayCompletedTask,
+)
+
+logger = logging.getLogger(__name__)
+
+# 全局进行中阶段上限（doc/03 8.9）
+MAX_ACTIVE_PHASES = 3
+
+# theme_type -> executor 映射（doc/05 §5.4，确定性规则）
+_HUMAN_TYPES = frozenset({"learning", "research", "source"})
+_AGENT_TYPES = frozenset({"dev", "survey"})
+
+
+def _iso_week(d: date) -> str:
+    """ISO 周字符串，如 "2026-W27"。"""
+    iso = d.isocalendar()
+    return f"{iso[0]}-W{iso[1]}"
+
+
+class DailyAppSvc:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+        self.daily_repo = DailyRecordRepository(db)
+        self.daily_task_repo = DailyTaskRepository(db)
+        self.subtask_repo = SubtaskRepository(db)
+        self.phase_repo = PhaseRepository(db)
+        self.task_repo = TaskRepository(db)
+        self.theme_repo = ThemeRepository(db)
+        self.opencode = OpenCodeClient()
+
+    # ---- GET /daily/plans/pool ----
+
+    def get_plans_pool(self, user_id: str, date_: date | None = None) -> DailyPoolData:
+        """今日任务池预查询（只读）。
+
+        过滤已激活阶段（activated_at 有值）+ 排除已暂停（status != '已暂停'）。
+        返回结构化数据供 pm-daily LLM 决策候选任务 + 推断 executor。
+        """
+        today = date_ if date_ is not None else now_utc_naive().date()
+        yesterday = today - timedelta(days=1)
+
+        yesterday_completed = self._query_yesterday_completed(yesterday)
+        yesterday_unconfirmed = self._check_yesterday_unconfirmed(yesterday)
+        active_phases = self._query_active_phases()
+        pending_tasks = self._query_pending_tasks(active_phases)
+        global_active_count = self.phase_repo.count_by_status("进行中")
+
+        return DailyPoolData(
+            date=today,
+            yesterday_completed=yesterday_completed,
+            yesterday_unconfirmed=yesterday_unconfirmed,
+            active_phases=active_phases,
+            pending_tasks=pending_tasks,
+            global_active_count=global_active_count,
+            global_active_limit=MAX_ACTIVE_PHASES,
+        )
+
+    def _query_yesterday_completed(self, yesterday: date) -> list[YesterdayCompletedTask]:
+        """昨日 daily_tasks 中已完成的任务。"""
+        y_record = self.daily_repo.get_by_date(yesterday)
+        if y_record is None:
+            return []
+        rows = self.db.execute(
+            select(Task.id, Task.name, Phase.name)
+            .join(DailyTask, DailyTask.task_id == Task.id)
+            .join(Phase, Task.phase_id == Phase.id)
+            .where(DailyTask.daily_id == y_record.id, Task.status == "已完成")
+        ).all()
+        return [YesterdayCompletedTask(task_id=r[0], name=r[1], phase_name=r[2]) for r in rows]
+
+    def _check_yesterday_unconfirmed(self, yesterday: date) -> bool:
+        """昨日 daily_record 存在且 is_confirmed=false。"""
+        y_record = self.daily_repo.get_by_date(yesterday)
+        return y_record is not None and not y_record.is_confirmed
+
+    def _query_active_phases(self) -> list[ActivePhaseInfo]:
+        """已激活（activated_at 有值）且非已暂停的阶段。"""
+        rows = self.db.execute(
+            select(Phase, Theme)
+            .join(Theme, Phase.theme_id == Theme.id)
+            .where(Phase.activated_at.is_not(None), Phase.status != "已暂停")
+        ).all()
+
+        result: list[ActivePhaseInfo] = []
+        for phase, theme in rows:
+            tasks = self.task_repo.list_by_phase(phase.id)
+            total = len(tasks)
+            completed = sum(1 for t in tasks if t.status == "已完成")
+            remaining = sum(1 for t in tasks if t.status == "待执行")
+            result.append(
+                ActivePhaseInfo(
+                    phase_id=phase.id,
+                    name=phase.name,
+                    theme_name=theme.name,
+                    theme_type=theme.type,
+                    deadline=phase.deadline,
+                    progress=f"{completed}/{total}",
+                    remaining_tasks=remaining,
+                )
+            )
+        return result
+
+    def _query_pending_tasks(self, active_phases: list[ActivePhaseInfo]) -> list[PendingTaskInfo]:
+        """活跃阶段下的待执行任务。"""
+        if not active_phases:
+            return []
+        phase_ids = [p.phase_id for p in active_phases]
+        rows = self.db.execute(
+            select(Task, Phase, Theme)
+            .join(Phase, Task.phase_id == Phase.id)
+            .join(Theme, Phase.theme_id == Theme.id)
+            .where(Task.phase_id.in_(phase_ids), Task.status == "待执行")
+            .order_by(Task.sort_order)
+        ).all()
+        return [
+            PendingTaskInfo(
+                task_id=task.id,
+                name=task.name,
+                phase_id=phase.id,
+                phase_name=phase.name,
+                phase_deadline=phase.deadline,
+                theme_type=theme.type,
+            )
+            for task, phase, theme in rows
+        ]
+
+    # ---- POST /daily/confirm ----
+
+    def confirm(
+        self,
+        user_id: str,
+        date_: date,
+        task_ids: list[str],
+        pre_subtasks: list[PreSubtaskInput],
+        push_source: str = "manual",
+    ) -> DailyConfirmData:
+        """确认今日计划：事务 INSERT 3 表 + 事务后异步触发 opencode。
+
+        事务5步（doc/04 §3.4）：
+          1. 校验 task_ids 属于已激活未暂停阶段 + 当日未确认过
+          2. INSERT daily_records（is_confirmed=true）
+          3. INSERT daily_tasks（UNIQUE 冲突 -> 409）
+          4. INSERT subtasks（勾选的前置，type=前置，status=待执行）
+          5. COMMIT（<200ms）
+
+        事务后异步（路由层 BackgroundTasks 调 trigger_async，独立 session）：
+          - dispatch_pre_subtasks（opencode 桩）
+          - 若有 agent-type 任务 -> start_agent_serve（opencode 桩）
+        """
+        # ---- 1. 校验 ----
+        tasks = self._validate_task_ids(task_ids)
+        self._check_duplicate_confirm(date_)
+
+        anchor_task_id = self._find_anchor_task(tasks)
+        has_agent_task = any(self._task_theme_type(t) in _AGENT_TYPES for t in tasks)
+
+        # ---- 2-4. 事务内：INSERT 3 表 ----
+        daily = DailyRecord(
+            id=str(uuid4()),
+            date=date_,
+            week=_iso_week(date_),
+            push_source=push_source,
+            is_confirmed=True,
+            confirmed_at=now_utc_naive(),
+        )
+        self.daily_repo.create(daily)
+
+        for task_id in task_ids:
+            dt = DailyTask(id=str(uuid4()), daily_id=daily.id, task_id=task_id)
+            self.daily_task_repo.create(dt)
+
+        pre_subtask_count = 0
+        if pre_subtasks and anchor_task_id:
+            sort_base = self.subtask_repo.next_sort_order(anchor_task_id)
+            for idx, ps in enumerate(pre_subtasks):
+                sub = Subtask(
+                    id=str(uuid4()),
+                    task_id=anchor_task_id,
+                    sort_order=sort_base + idx,
+                    name=ps.name,
+                    description=ps.description,
+                    type="前置",
+                    status="待执行",
+                )
+                self.subtask_repo.create(sub)
+                pre_subtask_count += 1
+
+        # ---- 5. COMMIT（<200ms，事务内无 IO/HTTP）----
+        self.db.commit()
+
+        return DailyConfirmData(
+            daily_id=daily.id,
+            date=date_,
+            task_count=len(task_ids),
+            pre_subtask_count=pre_subtask_count,
+            async_triggered=pre_subtask_count > 0 or has_agent_task,
+        )
+
+    @staticmethod
+    def trigger_async(daily_id: str) -> None:
+        """事务后异步触发（独立 session，BackgroundTasks 调用）。
+
+        S3 桩：调 OpenCodeClient 的 no-op 方法。S4A 换成真 HTTP dispatch。
+
+        从 daily_id 反查：
+          - pre_subtasks -> dispatch_pre_subtasks
+          - agent-type tasks -> start_agent_serve
+        """
+        db = SessionLocal()
+        try:
+            # 查 daily_tasks -> tasks -> phases -> themes 判断 agent-type
+            dt_rows = db.execute(
+                select(DailyTask.task_id).where(DailyTask.daily_id == daily_id)
+            ).all()
+            task_ids = [r[0] for r in dt_rows]
+            if not task_ids:
+                return
+
+            client = OpenCodeClient()
+
+            # 前置子任务 -> dispatch
+            pre_subs = (
+                db.execute(
+                    select(Subtask).where(Subtask.task_id.in_(task_ids), Subtask.type == "前置")
+                )
+                .scalars()
+                .all()
+            )
+            if pre_subs:
+                client.dispatch_pre_subtasks(
+                    [{"id": s.id, "name": s.name, "task_id": s.task_id} for s in pre_subs]
+                )
+
+            # agent-type 任务 -> start_agent_serve
+            agent_rows = db.execute(
+                select(Workspace, Theme.type)
+                .join(Theme, Workspace.theme_id == Theme.id)
+                .join(Phase, Phase.theme_id == Theme.id)
+                .join(Task, Task.phase_id == Phase.id)
+                .where(Task.id.in_(task_ids), Theme.type.in_(tuple(_AGENT_TYPES)))
+            ).all()
+            if agent_rows:
+                ws, _ = agent_rows[0]
+                client.start_agent_serve(ws.id)
+        except Exception:
+            logger.exception("daily trigger_async 失败: %s", daily_id)
+        finally:
+            db.close()
+
+    # ---- 校验辅助 ----
+
+    def _validate_task_ids(self, task_ids: list[str]) -> list[Task]:
+        """校验 task_ids：存在 + 属于已激活未暂停阶段。返回 Task 列表。"""
+        tasks: list[Task] = []
+        for tid in task_ids:
+            task = self.task_repo.get(tid)
+            if task is None:
+                raise NotFoundError(f"任务不存在: {tid}")
+            phase = self.phase_repo.get(task.phase_id)
+            if phase is None or phase.activated_at is None:
+                raise BadRequestError(f"任务 {tid} 所属阶段未激活")
+            if phase.status == "已暂停":
+                raise BadRequestError(f"任务 {tid} 所属阶段已暂停")
+            tasks.append(task)
+        return tasks
+
+    def _check_duplicate_confirm(self, date_: date) -> None:
+        """当日已确认过 -> 409（doc/04 1003）。"""
+        existing = self.daily_repo.get_by_date(date_)
+        if existing is not None:
+            raise ConflictError(f"日期 {date_} 已有每日计划记录")
+
+    def _find_anchor_task(self, tasks: list[Task]) -> str | None:
+        """找到第一个 human-type 任务作为 pre_subtask 锚点。
+
+        用 theme_type 映射（learning/research/source -> human，doc/05 §5.4）。
+        前置只对人执行任务（doc/01 关键决策）。
+        """
+        for task in tasks:
+            if self._task_theme_type(task) in _HUMAN_TYPES:
+                return task.id
+        return None
+
+    def _task_theme_type(self, task: Task) -> str:
+        """查 task 所属 theme 的 type。"""
+        phase = self.phase_repo.get(task.phase_id)
+        if phase is None:
+            return "learning"  # 防御性默认
+        theme = self.theme_repo.get(phase.theme_id)
+        return theme.type if theme is not None else "learning"

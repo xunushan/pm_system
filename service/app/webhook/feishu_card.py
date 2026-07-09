@@ -1,10 +1,11 @@
 """飞书卡片回调入口（入口 B）。
 
 飞书 3 秒超时：回调仅做 DB 写 + 即时级联（<200ms）后立即返回；
-耗时操作（工作空间初始化）事务提交后异步（BackgroundTasks）。
+耗时操作（工作空间初始化、opencode 执行）事务提交后异步（BackgroundTasks）。
 
-action_id 硬编码路由（doc/06 表2）：
-  schedule.confirm -> ScheduleAppSvc.confirm（多选专题+managed/path+deadline）
+action_id 硬编码路由（doc/06）：
+  schedule.confirm       -> ScheduleAppSvc.confirm（S2：多选专题+managed/path+deadline）
+  story3_确认今日计划     -> DailyAppSvc.confirm（S3：任务勾选+前置勾选 -> INSERT 3 表）
 其余 action_id 保留 TODO，由后续 Story 实现。
 """
 
@@ -16,7 +17,9 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas.common import ApiResponse
+from app.schemas.daily import DailyConfirmRequest
 from app.schemas.schedule import ScheduleConfirmRequest
+from app.services.daily_app_svc import DailyAppSvc
 from app.services.schedule_app_svc import ScheduleAppSvc
 from app.services.workspace_app_svc import WorkspaceAppSvc
 
@@ -48,5 +51,22 @@ async def feishu_card_callback(
                 background_tasks.add_task(WorkspaceAppSvc.init, ap.workspace_id)
         return ApiResponse(data=data).model_dump()
 
-    # 其余 action_id 保留 TODO（plan.confirm 在 Story1 已实现？此处不重复）
+    if action_id == "story3_确认今日计划":
+        try:
+            req = DailyConfirmRequest.model_validate(action_value)
+        except ValidationError as e:
+            return {"code": 1002, "message": f"回调参数不合法: {e}", "data": None}
+        data = DailyAppSvc(db).confirm(
+            user_id=req.user_id,
+            date_=req.date,
+            task_ids=req.task_ids,
+            pre_subtasks=req.pre_subtasks,
+            push_source=req.push_source,
+        )
+        # 事务后异步：opencode 执行前置 + 启动智能体 serve（3 秒超时内不阻塞）
+        if data.async_triggered:
+            background_tasks.add_task(DailyAppSvc.trigger_async, data.daily_id)
+        return ApiResponse(data=data).model_dump()
+
+    # 其余 action_id 保留 TODO（plan.confirm 走 plans/confirm API，不在此路由）
     return {"code": 0, "message": "noop", "data": None}
