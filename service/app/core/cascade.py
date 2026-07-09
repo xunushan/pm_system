@@ -1,11 +1,13 @@
 """即时级联：状态变更时事务内向上推导。
 
-级联分两类（doc/02 2.15）：
+级联分三类（doc/02 2.15-2.16）：
   - 激活级联（Story2）：phase 未开始->进行中 时，向上把仍"未开始"的 theme/goal 设"进行中"。
   - 完成级联（Story4B）：task 完成->阶段全完成?->phase 完成->专题全完成?->goal 完成。
+  - 回退级联（Story5）：task 回退->phase 若"已完成"拉回"进行中"
+    ->theme 若"已完成"拉回->goal 若"已完成"拉回。
 
 所有级联变更写 status_change_log（change_type='cascade', triggered_by='cascade'）。
-幂等：激活级联只动'未开始'的；完成级联只动'进行中'的（已完成/未开始/已暂停均不动）。
+幂等：激活级联只动'未开始'的；完成级联只动'进行中'的；回退级联只动'已完成'的。
 事务内纯 DB（<200ms），满足飞书 3 秒回调。
 """
 
@@ -41,6 +43,48 @@ def cascade_status(db: Session, entity_type: str, entity_id: str) -> dict:
         return _cascade_complete(db, entity_id)
 
     return {}
+
+
+def cascade_revert(db: Session, task_id: str) -> dict:
+    """回退级联（Story5，doc/02 2.16）：task 回退后向上回退已完成的上级。
+
+    task 已完成->待执行 后：检查其 phase，若 phase.status=='已完成' 则置'进行中'
+    （清 completed_at，写 cascade 审计 + emit），然后同理检查 theme、goal。
+
+    幂等：只动'已完成'的上级（进行中/未开始/已暂停均不动）。
+    只向上回退「因该子级不再完成而不应再已完成」的上级，遇到第一个非'已完成'即停。
+
+    Returns:
+        {phase_reverted, theme_reverted, goal_reverted}
+    """
+    result = {"phase_reverted": False, "theme_reverted": False, "goal_reverted": False}
+
+    task = db.get(Task, task_id)
+    if task is None:
+        return result
+
+    phase = db.get(Phase, task.phase_id)
+    if phase is None or phase.status != "已完成":
+        return result
+    _revert_cascade_status(db, "phase", phase, "进行中", clear_completed_at=True)
+    emit({"type": "phase_reverted", "entity_id": phase.id})
+    result["phase_reverted"] = True
+
+    theme = db.get(Theme, phase.theme_id)
+    if theme is None or theme.status != "已完成":
+        return result
+    _revert_cascade_status(db, "theme", theme, "进行中")
+    emit({"type": "theme_reverted", "entity_id": theme.id})
+    result["theme_reverted"] = True
+
+    goal = db.get(Goal, theme.goal_id)
+    if goal is None or goal.status != "已完成":
+        return result
+    _revert_cascade_status(db, "goal", goal, "进行中")
+    emit({"type": "goal_reverted", "entity_id": goal.id})
+    result["goal_reverted"] = True
+
+    return result
 
 
 # ---- 激活级联（Story2）----
@@ -133,6 +177,30 @@ def _set_cascade_status(
     entity.status_changed_at = now_utc_naive()
     if completed_at is not None and hasattr(entity, "completed_at"):
         entity.completed_at = completed_at
+    audit.log_status_change(
+        db,
+        entity_type=entity_type,
+        entity_id=entity.id,
+        from_status=from_status,
+        to_status=to_status,
+        change_type="cascade",
+        triggered_by="cascade",
+    )
+
+
+def _revert_cascade_status(
+    db: Session, entity_type: str, entity, to_status: str, clear_completed_at: bool = False
+) -> None:
+    """回退级联：把单个'已完成'实体拉回到 to_status（'进行中'），写 cascade 审计。
+
+    回退级联对 phase 清 completed_at（phase 有该列）；theme/goal 无 completed_at 列。
+    只在 cascade_revert 中调用，调用方已确保 entity.status=='已完成'。
+    """
+    from_status = entity.status
+    entity.status = to_status
+    entity.status_changed_at = now_utc_naive()
+    if clear_completed_at and hasattr(entity, "completed_at"):
+        entity.completed_at = None
     audit.log_status_change(
         db,
         entity_type=entity_type,

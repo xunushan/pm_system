@@ -24,6 +24,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.clients.fileio import write_daily_md
 from app.clients.opencode import OpenCodeClient
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.times import now_utc_naive
@@ -45,10 +46,15 @@ from app.schemas.daily import (
     ActivePhaseInfo,
     DailyConfirmData,
     DailyPoolData,
+    DailySummaryConfirmData,
+    DailySummaryData,
+    DailySummaryPhaseHealth,
+    DailySummaryTaskItem,
     PendingTaskInfo,
     PreSubtaskInput,
     YesterdayCompletedTask,
 )
+from app.services.stats_app_svc import StatsAppSvc
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +82,105 @@ class DailyAppSvc:
         self.task_repo = TaskRepository(db)
         self.theme_repo = ThemeRepository(db)
         self.opencode = OpenCodeClient()
+
+    # ---- GET /daily/summary/generate (Story5) ----
+
+    def generate_summary(self, user_id: str, date_: date | None = None) -> DailySummaryData:
+        """日终总结统计预查询（只读，纯 Service 代码）。
+
+        统计查询复用 StatsAppSvc.get_daily_stats。文案/建议由 pm-summary LLM 生成，
+        S5 不碰 LLM（铁律 §3#1）。不级联（级联已即时，铁律 §3 异议级联在 PATCH）。
+        """
+        stats = StatsAppSvc(self.db).get_daily_stats(user_id, date_)
+        return DailySummaryData(
+            date=stats.date,
+            daily_id=stats.daily_id,
+            is_confirmed=stats.is_confirmed,
+            completed_tasks=[
+                DailySummaryTaskItem(task_id=t.task_id, name=t.name, theme_name=t.theme_name)
+                for t in stats.completed_tasks
+            ],
+            incomplete_tasks=[
+                DailySummaryTaskItem(task_id=t.task_id, name=t.name, theme_name=t.theme_name)
+                for t in stats.incomplete_tasks
+            ],
+            phase_health=[
+                DailySummaryPhaseHealth(
+                    phase_id=p.phase_id,
+                    name=p.name,
+                    completed=p.completed,
+                    total=p.total,
+                    rate=p.rate,
+                    status=p.status,
+                )
+                for p in stats.phase_health
+            ],
+            active_phase_count=stats.active_phase_count,
+            global_active_limit=stats.global_active_limit,
+        )
+
+    # ---- POST /daily/summary/confirm (Story5) ----
+
+    def confirm_summary(self, daily_id: str) -> DailySummaryConfirmData:
+        """确认日终总结。不级联（级联已即时），仅写快照 + 标记 is_confirmed。
+
+        事务（doc/04 §3.5）：
+          1. UPDATE daily_records SET is_confirmed=1, confirmed_at=now
+          2. COMMIT（<200ms）
+
+        事务后异步（路由层 BackgroundTasks 调 write_daily_md_async）：
+          3. 写 daily.md 快照（纯文件 IO）
+        """
+        daily = self.daily_repo.get(daily_id)
+        if daily is None:
+            raise NotFoundError(f"每日计划记录不存在: {daily_id}")
+        if daily.is_confirmed:
+            raise ConflictError(f"日终总结已确认: {daily_id}")
+
+        daily.is_confirmed = True
+        daily.confirmed_at = now_utc_naive()
+        self.db.commit()
+
+        # 事务后异步写 daily.md（路由层调 write_daily_md_async）
+        return DailySummaryConfirmData(daily_id=daily_id, confirmed=True, daily_md_path=None)
+
+    @staticmethod
+    def write_daily_md_async(daily_id: str) -> str | None:
+        """事务后异步写 daily.md 快照（独立 session，BackgroundTasks 调用）。
+
+        从 daily_id 反查统计数据 -> 写入 vault/daily/{date}.md。
+        """
+        db = SessionLocal()
+        try:
+            daily = db.get(DailyRecord, daily_id)
+            if daily is None:
+                return None
+            stats = StatsAppSvc(db).get_daily_stats("system", daily.date)
+            summary_data = {
+                "completed_tasks": [
+                    {"name": t.name, "theme_name": t.theme_name} for t in stats.completed_tasks
+                ],
+                "incomplete_tasks": [
+                    {"name": t.name, "theme_name": t.theme_name} for t in stats.incomplete_tasks
+                ],
+                "phase_health": [
+                    {
+                        "name": p.name,
+                        "completed": p.completed,
+                        "total": p.total,
+                        "rate": p.rate,
+                        "status": p.status,
+                    }
+                    for p in stats.phase_health
+                ],
+                "summary": daily.summary,
+            }
+            return write_daily_md("system", daily.date, summary_data)
+        except Exception:
+            logger.exception("write_daily_md_async 失败: %s", daily_id)
+            return None
+        finally:
+            db.close()
 
     # ---- GET /daily/plans/pool ----
 

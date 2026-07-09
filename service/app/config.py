@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Supervisor 巡检开关
     supervisor_enabled: bool = True
 
+    # Obsidian Vault 根路径（daily.md/weekly.md 快照写入）
+    vault_root: str = "./vault"
+
     def ensure_data_dir(self) -> None:
         """确保 SQLite 数据文件所在目录存在。"""
         if not self.database_url.startswith("sqlite"):

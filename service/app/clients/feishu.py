@@ -163,6 +163,91 @@ def build_verification_card(task_id: str, task_name: str, file_paths: list[str])
     }
 
 
+def build_daily_summary_card(
+    daily_id: str,
+    date_str: str,
+    completed_tasks: list[dict],
+    incomplete_tasks: list[dict],
+    phase_health: list[dict],
+) -> dict:
+    """构建日终总结卡片（模板填充，无 LLM，doc/06 步骤4）。
+
+    卡片内容：今日任务列表（每项带状态切换按钮）+ 步骤进展 + 确认日终总结按钮。
+    异议双向按钮（doc/01 S5 + D18）：
+      - 已完成 -> 显示[标记未完成]按钮
+      - 未完成 -> 显示[标记完成]按钮
+    """
+    lines: list[str] = [f"📊 **今日总结（{date_str}）**\n"]
+
+    # 今日任务
+    lines.append("**今日任务：**")
+    for t in completed_tasks:
+        lines.append(f"· {t['name']} ✅  [标记未完成]")
+    for t in incomplete_tasks:
+        lines.append(f"· {t['name']} ❌  [标记完成]")
+
+    # 阶段进展
+    if phase_health:
+        lines.append("\n**步骤进展：**")
+        for p in phase_health:
+            pct = int(p.get("rate", 0) * 100)
+            lines.append(f"· {p['name']} {p['completed']}/{p['total']} {p['status']}（{pct}%）")
+
+    content = "\n".join(lines)
+
+    # 按钮列表：每个任务一个状态切换按钮
+    actions: list[dict] = []
+    for t in completed_tasks:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "content": f"标记未完成：{t['name']}"},
+                "value": {
+                    "action_id": "story5_标记未完成",
+                    "task_id": t["task_id"],
+                    "daily_id": daily_id,
+                    "user_id": "",
+                },
+            }
+        )
+    for t in incomplete_tasks:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "content": f"标记完成：{t['name']}"},
+                "value": {
+                    "action_id": "story5_标记完成",
+                    "task_id": t["task_id"],
+                    "daily_id": daily_id,
+                    "user_id": "",
+                },
+            }
+        )
+    # 确认日终总结按钮
+    actions.append(
+        {
+            "type": "button",
+            "text": {"type": "plain_text", "content": "确认日终总结"},
+            "value": {
+                "action_id": "story5_确认日终总结",
+                "daily_id": daily_id,
+                "user_id": "",
+            },
+        }
+    )
+
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+            "actions": actions,
+        },
+    }
+
+
 def _to_json_str(obj: dict) -> str:
     import json
 

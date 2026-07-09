@@ -196,3 +196,37 @@ class TimeoutAlertData(BaseModel):
     """POST /api/callback/opencode/timeout 响应。"""
 
     alert_sent: bool
+
+
+# ---- PATCH /tasks/{taskId} (Story5 日终异议双向) ----
+
+
+class TaskPatchStatusRequest(BaseModel):
+    """PATCH /tasks/{taskId} 请求（日终异议双向状态变更）。
+
+    status: 目标状态（已完成=forward / 待执行=revert）。
+    triggered_by: 触发者（user/agent_callback/supervisor）。
+    completed_at: 完成时间（forward 时可选，默认 now）。
+
+    revert 的 reason 由系统自动填（日终异议-标记未完成），不弹窗（D18 裁决）。
+    """
+
+    status: str  # 已完成 / 待执行
+    completed_at: datetime | None = None
+    triggered_by: str = "user"
+
+
+class RevertCascadeResult(BaseModel):
+    """回退级联结果：哪些上级被级联回退。"""
+
+    phase_reverted: bool = False
+    theme_reverted: bool = False
+    goal_reverted: bool = False
+
+
+class TaskPatchStatusData(BaseModel):
+    """PATCH /tasks/{taskId} 响应。"""
+
+    task_id: str
+    status: str
+    cascade: CascadeResult | RevertCascadeResult
