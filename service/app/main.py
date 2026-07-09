@@ -8,9 +8,12 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_router
+from app.core.exceptions import AppError
+from app.schemas.common import ApiResponse
 from app.webhook.feishu_card import router as webhook_router
 
 
@@ -25,6 +28,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="目标管理系统 Service", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(AppError)
+async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:  # noqa: ARG001
+    """业务异常 -> 统一错误响应 {code, message, data: null}（doc/04 2.2/2.3）。"""
+    return JSONResponse(
+        status_code=exc.http_status,
+        content=ApiResponse(code=exc.code, message=exc.message, data=None).model_dump(),
+    )
 
 
 @app.get("/health", tags=["meta"])
