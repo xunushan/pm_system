@@ -13,6 +13,7 @@ from app.schemas.common import (
     CODE_NOT_FOUND,
     CODE_QUOTA_EXCEEDED,
     CODE_REASON_REQUIRED,
+    CODE_TEMPLATE_EXISTS,
 )
 
 
@@ -58,6 +59,13 @@ class ReasonRequiredError(AppError):
 
     def __init__(self, message: str = "状态回退/暂停需 reason") -> None:
         super().__init__(CODE_REASON_REQUIRED, message, http_status=400)
+
+
+class TemplateExistsError(AppError):
+    """子任务模板已存在（doc/04 2.3: 3001，UNIQUE(scope_id,type,name) 冲突）。"""
+
+    def __init__(self, message: str = "模板已存在") -> None:
+        super().__init__(CODE_TEMPLATE_EXISTS, message, http_status=409)
 
 
 class InternalError(AppError):
