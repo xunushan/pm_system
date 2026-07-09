@@ -14,11 +14,11 @@ model 类只有被 import 才会注册到 metadata。
   - tasks               ✅ Story1  (app/models/task.py)
   - drafts              ✅ Story1  (app/models/draft.py)
   - workspaces          ✅ Story2  (app/models/workspace.py)
-  - daily_records       ⬜ Story3
-  - daily_tasks         ⬜ Story3
+  - daily_records       ✅ Story3  (app/models/daily_record.py)
+  - daily_tasks         ✅ Story3  (app/models/daily_task.py)
   - workspace_progress  ⬜ Story4A
   - agent_processes     ⬜ Story4A
-  - subtasks            ⬜ Story4B
+  - subtasks            ✅ Story3 起建（前置 INSERT）；S4B 扩后置+完成
   - status_change_log   ✅ Story2 起建（forward）；S5 扩 pause/resume/revert
   - weekly_records      ⬜ Story6
   - subtask_templates   ⬜ Story7
