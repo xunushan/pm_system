@@ -20,7 +20,7 @@ model 类只有被 import 才会注册到 metadata。
   - agent_processes     ✅ Story4A (app/models/agent_process.py)
   - subtasks            ✅ Story3 起建（前置 INSERT）；S4B 扩后置+完成逻辑
   - status_change_log   ✅ Story2 起建（forward）；S5 扩 pause/resume/revert
-  - weekly_records      ⬜ Story6
+  - weekly_records      ✅ Story6 (app/models/weekly_record.py)
   - subtask_templates   ⬜ Story7
 """
 
