@@ -30,7 +30,7 @@ S1 规划（基石）
 | S4B 人完成任务 | ✅已合并 | - | #4 | - | S3 | - |
 | S5 日终总结 | ✅已合并 | - | #6 | - | S4B | - |
 | S6 周总结 | ✅已合并 | - | #8 | - | S5 | - |
-| S7 子任务配置 | ⬜未开始 | - | - | - | S1 | - |
+| S7 子任务配置 | ✅已合并 | - | #11 | - | S1 | - |
 | S8 主动巡检 | ✅已合并 | - | #9 | - | S5,S6 | - |
 | S9 轻量编辑与回退 | ✅已合并 | - | #10 | - | S8 | - |
 
@@ -57,6 +57,37 @@ S1 规划（基石）
 | S6 周总结 | #8 | 302dd30 | 2026-07-09 | 339 passed | weekly_records 1 model + 第5迁移(1表无索引,手动剔除autogenerate误带16个remove_index[issue#7遗留]) + WeeklyRecordRepository(get_by_week) + StatsAppSvc扩get_weekly_stats(daily_stats7天趋势/phase_health/agent_output_stats按file_type聚合/subtask_stats前置后置/supervisor_linking_status占位None[接口先行S8填]) + WeeklyAppSvc(generate_summary/confirm_summary/write_weekly_md_async) + fileio.write_weekly_md + weekly路由(替换桩为generate/confirm) + GET /stats/weekly(§3.11) + webhook story6_已阅周总结(3秒返回,weekly.md异步)；ISO周用date.fromisocalendar(周一~周日,与daily_records.week互逆一致,doc/04示例非标准ISO周)；纯回顾不改任何状态(有测试断言)；review 无P0P1(2×P2 N+1查询上限7天可忽略+1×P3风格,不阻塞) |
 | S8 主动巡检 | #9 | 20e566a | 2026-07-09 | 402 passed | 无迁移(无新表) + event_bus桩换真分发(进程内异步队列,已裁决:emit事务内queue.put_nowait不阻塞,daemon线程消费调handler,重启丢事件由巡检兜底,emit签名不变9处调用零改动) + handlers(on_phase/theme/goal_completed查下一阶段+deadline推算+推衔接卡片+Redis记时间,独立SessionLocal读DB无脏读,IO异常不崩溃) + scheduler(APScheduler5类cron巡检:scheduled_start_date/deadline临近/未确认计划10:00/未日终21:00/衔接24h未响应,Redis去重supervisor:notified,已暂停不巡检,每天1次) + linking(find_next_phase sort_order+1/compute_suggested_deadline纯计算/get_linking_status替换S6占位None) + schedules/activate端点(复用S2激活核心,triggered_by=supervisor,≤3校验,异步工作空间初始化) + webhook story8_确认激活/暂不激活/去激活/去页面调整 + main.py lifespan启停dispatcher+scheduler + conftest autouse禁用supervisor；裁决事件分发用进程内异步队列(非Redis pub/sub)；review 无P0P1(6×P2+2×P3已修:P2-1 _get_redis三处重复提redis_client.py复用[违反§11先搜后建]/P2-5 _DEFAULT_CHAT_ID私有名提constants.py/P2-2/3/4延迟import提顶/P3 _parse_iso迁times.py)；APScheduler依赖已加(pyproject) |
 | S9 轻量编辑与回退 | #10 | d8f8cf1 | 2026-07-09 | 447 passed | 无迁移(无新表) + **issue#7并入修复**(12 model补16个Index声明对应migration已建索引,alembic check通过消除16个remove_index,CI加alembic check步骤防回归,Fixes#7自动关闭) + BoardAppSvc(update_fields字段编辑/阶段排序/增删任务/managed不可改 + change_status复用S5 state_machine pause/resume/revert校验+ReasonRequiredError1005,forward拒绝走activate,级联调cascade_revert_entity) + cascade新增cascade_revert_entity(通用回退入口:task委托S5既有cascade_revert[禁重写],phase/theme/goal向上回退不向下回退子task[最小回退+DB唯一真相源],幂等只动已完成上级) + state_machine扩展goal/theme pause/resume/revert(与phase同规则,doc/02 line8依据) + board路由(PUT/{entity}/{id}字段编辑+POST/{entity}/{id}/status状态变更) + DELETE /tasks/{id}物理删除+关联清理(daily_tasks/subtasks/workspace_progress手动删,FK无CASCADE) + GET /workspaces/{id}(S4A已建managed/path只读确认)；裁决issue#7并入S9(收官清债)；review 无P0P1(2×P2+1×P3已修:P2-2 _apply_phase_orders全包含校验防UNIQUE冲突+补测试/P2-1 _VALID_ENTITIES死代码删/P3 _augment_revert_result未用参数删) |
+| S7 子任务配置 | #11 | 71ffa99 | 2026-07-09 | 495 passed | subtask_templates 1 model(第6迁移,§2.6:scope_type theme/phase+scope_id+type 前置/后置+name+description+status active/inactive+UNIQUE(scope_id,type,name)+2 Index[model与migration一致]) + SubtaskTemplateRepository(list/find_existing/list_active_by_scope) + ConfigAppSvc纯CRUD(list/create/update/delete + list_merged_by_task合并规则§2.18阶段优先专题同名去重[service层代码合并非SQL视图] + TemplateExistsError 3001[UNIQUE冲突] + DELETE标记inactive非物理删除可恢复幂等 + 配置不校验专题type) + subtask_templates路由(GET/POST/PUT/DELETE,prefix=/subtask-templates) + 删除config.py占位桩(被正式路由取代) + GET增task_id参数[供pm-subtask Skill,doc/04未列但§2.18合并规则入口]；alembic check通过(model Index与migration一致)；review 无P0P1(2×P2+2×P3已修:P2-2 list_merged_by_task补type校验+补测试/P2-1路由冗余elif简化/P3-2 type_命名统一/P3-1 status default[项目惯例一致skip])；**全项目收官 Story** |
+
+## 🎯 全项目收官总览
+
+**9/9 Story 全部合并到 main**（2026-07-09 一日内完成）：
+
+| Story | PR | commit | 测试累计 |
+|-------|-----|--------|---------|
+| S1 目标规划与确认 | #1 | a6a34d3 | 90 |
+| S2 调度激活 | #2 | cd8f7b8 | 137 |
+| S3 今日计划推送 | #3 | 8251237 | 168 |
+| S4B 人完成任务 | #4 | 0ad66b2 | 219 |
+| S4A 智能体执行 | #5 | 498ccfb | 272 |
+| S5 日终总结 | #6 | a59baba | 314 |
+| S6 周总结 | #8 | 302dd30 | 339 |
+| S8 主动巡检 | #9 | 20e566a | 402 |
+| S9 轻量编辑与回退 | #10 | d8f8cf1 | 447 |
+| S7 子任务配置 | #11 | 71ffa99 | 495 |
+
+**最终状态**：
+- **495 个测试全绿**（lint + alembic check + migrate 全通过）
+- **14 张表**全部建成（goals/themes/phases/tasks/drafts/workspaces/daily_records/daily_tasks/workspace_progress/agent_processes/subtasks/status_change_log/weekly_records/subtask_templates）
+- **6 个迁移**链完整（无多 head，alembic check 通过）
+- **无遗留技术债**：issue #7（16 索引 ORM 声明）在 S9 闭环 + CI 加 alembic check 防回归
+- **无 open PR / 无 open issue**
+- **关键架构决策**（均在各 Story 派发前裁决）：
+  - S5 异议 revert 系统填默认 reason（D6+D18 冲突裁决）
+  - S8 事件总线用进程内异步队列（非 Redis pub/sub）
+  - S9 issue #7 并入清债（收官清零技术债）
+- **5 个 Skill 仍为 SKILL.md 占位**（CLAUDE.md §八.4）：pm/pm-plan/pm-daily/pm-subtask/pm-summary 的实际 Skill 代码需参考 Hermes 框架文档实现（交互层，非本服务层范围）
+- **H5 前端仅骨架**（CLAUDE.md §八.5）：仅健康检查联通，页面设计待后续
 
 ### 下游解锁（S9 合并后 -- 收官）
 - **S9 已合并**（PR #10, d8f8cf1）：收官 Story。board H5 编辑（PUT 字段/排序/增删）+ 状态回退（POST pause/resume/revert）+ DELETE 物理删除 + GET workspace managed/path。复用 S5 state_machine（扩 goal/theme）+ cascade_revert_entity（不向下回退，最小回退）。
