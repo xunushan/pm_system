@@ -433,3 +433,11 @@ class TestMergeRule:
         r1 = svc.list_merged(phase_id=phase_id, theme_id=theme_id, type="前置")
         r2 = svc.list_merged(phase_id=phase_id, theme_id=theme_id, type="前置")
         assert {t.name for t in r1.templates} == {t.name for t in r2.templates} == {"A", "B"}
+
+    def test_merge_by_task_invalid_type(self, db_session):
+        """list_merged_by_task：type 非法 -> BadRequestError 1002。"""
+        goal, themes, phases = make_tree(db_session, tasks_per_phase=1)
+        task = db_session.query(Task).filter_by(phase_id=phases[0].id).first()
+        svc = ConfigAppSvc(db_session)
+        with pytest.raises(BadRequestError):
+            svc.list_merged_by_task(task.id, type="中间")

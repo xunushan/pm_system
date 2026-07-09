@@ -130,6 +130,16 @@ def test_list_merged_by_task(client, db_session):
     assert prep["description"] == "阶段级"
 
 
+def test_list_merged_by_task_invalid_type_returns_400(client, db_session):
+    """GET ?task_id=X&type=非法 -> 400 (1002)，type 校验在 task_id 分支也生效。"""
+    goal, themes, phases = make_tree(db_session, tasks_per_phase=1)
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).first()
+
+    resp = client.get(_API, params={"task_id": task.id, "type": "中间"})
+    assert resp.status_code == 400
+    assert resp.json()["code"] == 1002
+
+
 # ===== POST /subtask-templates =====
 
 

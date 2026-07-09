@@ -82,7 +82,12 @@ class ConfigAppSvc:
         return SubtaskTemplateListData(templates=[self._to_data(t) for t in merged])
 
     def list_merged_by_task(self, task_id: str, type: str | None = None) -> SubtaskTemplateListData:
-        """按 task_id 合并查询（task -> phase_id -> theme_id，doc/02 2.18）。"""
+        """按 task_id 合并查询（task -> phase_id -> theme_id，doc/02 2.18）。
+
+        type 若提供则校验合法性（非前置/后置 -> 400）。
+        """
+        if type is not None:
+            self._validate_type(type)
         task = self.db.get(Task, task_id)
         if task is None:
             raise NotFoundError(f"任务不存在: {task_id}")
@@ -190,12 +195,12 @@ class ConfigAppSvc:
 
     @staticmethod
     def _validate_query_params(
-        scope_type: str | None, type: str | None, status: str | None
+        scope_type: str | None, type_: str | None, status: str | None
     ) -> None:
         if scope_type is not None and scope_type not in _SCOPE_TYPES:
             raise BadRequestError(f"scope_type 非法: {scope_type!r}（仅 theme/phase）")
-        if type is not None and type not in _TYPES:
-            raise BadRequestError(f"type 非法: {type!r}（仅 前置/后置）")
+        if type_ is not None and type_ not in _TYPES:
+            raise BadRequestError(f"type 非法: {type_!r}（仅 前置/后置）")
         if status is not None and status not in _STATUSES:
             raise BadRequestError(f"status 非法: {status!r}（仅 active/inactive）")
 

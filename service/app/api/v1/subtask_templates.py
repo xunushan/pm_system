@@ -47,12 +47,10 @@ def list_templates(
     """
     svc = ConfigAppSvc(db)
     if task_id is not None:
+        # task_id 分支：合并查询（type 校验在 service 层 list_merged_by_task 内）
         data = svc.list_merged_by_task(task_id, type=type)
-    elif scope_type is not None and scope_id is not None:
-        data = svc.list_templates(
-            scope_type=scope_type, scope_id=scope_id, type=type, status=status
-        )
     else:
+        # 普通过滤查询（type/scope_type/status 校验在 service 层 list_templates 内）
         data = svc.list_templates(
             scope_type=scope_type, scope_id=scope_id, type=type, status=status
         )
