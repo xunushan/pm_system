@@ -37,5 +37,3 @@ for _f in _MODELS_DIR.glob("*.py"):
         import_module(f"app.models.{_f.stem}")
 
 __all__ = ["Base"]
-
-__all__ = ["Base"]

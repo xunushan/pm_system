@@ -6,7 +6,7 @@ phases.deadline=NULL、draft 已删、H5 链接。
 
 import pytest
 
-from app.core.exceptions import BadRequestError, NotFoundError
+from app.core.exceptions import BadRequestError, ConflictError, DraftExpiredError, NotFoundError
 from app.models.draft import Draft
 from app.models.goal import Goal
 from app.models.phase import Phase
@@ -176,3 +176,33 @@ def test_confirm_h5_url_uses_goal_id(db_session):
     result = PlanAppSvc(db_session).confirm(draft_id)
     goal = db_session.query(Goal).one()
     assert result.h5_url.endswith(f"/plan/{goal.id}")
+
+
+def test_confirm_expired_draft_raises_expired(db_session):
+    """P2-3: draft 过期 -> DraftExpiredError (code 1007)。"""
+    from datetime import timedelta
+
+    from app.services.draft_app_svc import now_utc_naive
+
+    draft_id = _seed_draft(db_session)
+    draft = db_session.get(Draft, draft_id)
+    draft.expires_at = now_utc_naive() - timedelta(hours=1)
+    db_session.commit()
+
+    with pytest.raises(DraftExpiredError):
+        PlanAppSvc(db_session).confirm(draft_id)
+
+
+def test_confirm_concurrent_draft_delete_raises_conflict(db_session):
+    """P1-2: draft 删除失败（并发已删）-> ConflictError + 事务回滚不写正式表。"""
+    draft_id = _seed_draft(db_session)
+    svc = PlanAppSvc(db_session)
+    # 模拟并发：draft_repo.delete 返回 False（行已不存在）
+    svc.draft_repo.delete = lambda _id: False  # noqa: E731
+
+    with pytest.raises(ConflictError):
+        svc.confirm(draft_id)
+    # 事务未提交 -> 回滚后正式表无写入
+    db_session.rollback()
+    assert db_session.query(Goal).count() == 0
+    assert db_session.query(Theme).count() == 0

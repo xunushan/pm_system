@@ -8,6 +8,13 @@ Story1 核心事务接口。确认按钮回调只传 draft_id（规避飞书 30K
   - phases.deadline = NULL（激活时填，Story2）
   - goals/themes/phases 初始 '未开始'，tasks 初始 '待执行'
   - 无"变为已完成"流转 -> 无即时向上级联、不写 status_change_log
+
+content 契约（plan 态）：嵌套结构 `{goal, themes:[{phases:[{tasks:[...]}]}]}`，
+自包含、无需引用 ID 即可建 goal->theme->phase->task 的 FK 链。
+与 doc/04 §3.1 示例的扁平 `{goal,themes,phases,tasks}` 不同（扁平未规定父子引用机制）；
+doc 只读不改，保留嵌套并在 PlanContent 中校验结构。
+
+事务原子性：写正式表 + 删 draft 在同一事务；draft 删除失败（并发已删）-> 回滚 + 409。
 事务内禁止 IO/HTTP；H5 链接直接返回（无异步副作用）。
 """
 
@@ -28,7 +35,14 @@ from app.repositories.goal import GoalRepository
 from app.repositories.phase import PhaseRepository
 from app.repositories.task import TaskRepository
 from app.repositories.theme import ThemeRepository
-from app.schemas.plan import PlanConfirmData, PlanContent
+from app.schemas.plan import (
+    PlanConfirmData,
+    PlanContent,
+    PlanPhaseContent,
+    PlanTaskContent,
+    PlanThemeContent,
+)
+from app.services.draft_app_svc import raise_if_draft_expired
 
 
 class PlanAppSvc:
@@ -41,14 +55,18 @@ class PlanAppSvc:
         self.task_repo = TaskRepository(db)
 
     def confirm(self, draft_id: str) -> PlanConfirmData:
-        """确认方案：读 draft -> 事务写 4 张正式表 -> 删 draft -> 返回 H5 链接。"""
+        """确认方案：读 draft -> 事务写 4 张正式表 -> 删 draft -> 返回 H5 链接。
+
+        draft 不存在 -> 404；非 pending -> 409；过期 -> 410(1007)；并发删除失败 -> 409。
+        """
         draft = self.draft_repo.get(draft_id)
         if draft is None:
             raise NotFoundError(f"草稿不存在: {draft_id}")
         if draft.status != "pending":
             raise ConflictError(f"草稿状态非 pending: {draft.status}")
+        raise_if_draft_expired(draft)  # 过期 -> DraftExpiredError (code 1007)
 
-        # 解析 draft.content 为 PlanContent
+        # 解析 draft.content 为 PlanContent（嵌套结构，见类 docstring）
         try:
             content_raw = json.loads(draft.content)
         except (json.JSONDecodeError, TypeError) as e:
@@ -73,8 +91,10 @@ class PlanAppSvc:
                     self._create_task(task_item, phase.id)
                     tasks_n += 1
 
-        # 删 drafts（doc/04 3.2 事务步骤 6）
+        # 删 drafts（doc/04 3.2 事务步骤 6）。返回 False 说明并发已删 -> 事务非原子 -> 回滚
         draft_deleted = self.draft_repo.delete(draft_id)
+        if not draft_deleted:
+            raise ConflictError("草稿已被并发删除，无法确认")
 
         self.db.commit()
 
@@ -84,7 +104,7 @@ class PlanAppSvc:
             themes_created=themes_n,
             phases_created=phases_n,
             tasks_created=tasks_n,
-            draft_deleted=draft_deleted,
+            draft_deleted=True,
             h5_url=f"{settings.h5_base_url}/plan/{goal.id}",
         )
 
@@ -102,7 +122,7 @@ class PlanAppSvc:
         self.goal_repo.create(goal)
         return goal
 
-    def _create_theme(self, theme_item, goal_id: str) -> Theme:
+    def _create_theme(self, theme_item: PlanThemeContent, goal_id: str) -> Theme:
         theme = Theme(
             id=str(uuid4()),
             goal_id=goal_id,
@@ -114,7 +134,7 @@ class PlanAppSvc:
         self.theme_repo.create(theme)
         return theme
 
-    def _create_phase(self, phase_item, theme_id: str) -> Phase:
+    def _create_phase(self, phase_item: PlanPhaseContent, theme_id: str) -> Phase:
         phase = Phase(
             id=str(uuid4()),
             theme_id=theme_id,
@@ -127,7 +147,7 @@ class PlanAppSvc:
         self.phase_repo.create(phase)
         return phase
 
-    def _create_task(self, task_item, phase_id: str) -> Task:
+    def _create_task(self, task_item: PlanTaskContent, phase_id: str) -> Task:
         task = Task(
             id=str(uuid4()),
             phase_id=phase_id,

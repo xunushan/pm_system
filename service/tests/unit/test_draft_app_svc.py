@@ -1,9 +1,12 @@
 """DraftAppSvc 乐观锁与 CRUD 单元测试（直连 db_session）。"""
 
+from datetime import timedelta
+
 import pytest
 
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
-from app.services.draft_app_svc import DraftAppSvc
+from app.core.exceptions import BadRequestError, ConflictError, DraftExpiredError, NotFoundError
+from app.models.draft import Draft
+from app.services.draft_app_svc import DraftAppSvc, now_utc_naive
 
 _CONTENT = {"goal": {"name": "G"}, "themes": []}
 
@@ -95,3 +98,16 @@ def test_uuid_is_unique_per_create(db_session):
     c1 = svc.create(user_id="u1", story_type="plan", content=_CONTENT)
     c2 = svc.create(user_id="u1", story_type="plan", content=_CONTENT)
     assert c1.draft_id != c2.draft_id
+
+
+def test_update_expired_draft_raises_expired(db_session):
+    """过期 draft 更新 -> DraftExpiredError (code 1007)。"""
+    svc = DraftAppSvc(db_session)
+    created = svc.create(user_id="u1", story_type="plan", content=_CONTENT)
+    # 置 expires_at 为过去
+    draft = db_session.get(Draft, created.draft_id)
+    draft.expires_at = now_utc_naive() - timedelta(hours=1)
+    db_session.commit()
+
+    with pytest.raises(DraftExpiredError):
+        svc.update(draft_id=created.draft_id, content=_CONTENT, version=1)

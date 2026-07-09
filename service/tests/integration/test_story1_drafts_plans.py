@@ -3,14 +3,18 @@
 验收要点（doc/01 S1）：
   - 回调只传 draft_id（规避 30KB）
   - Service 用 draft_id 读 drafts -> 写正式表 -> 删 drafts -> 返回 H5 链接
-  - 边界：confirm 不存在 draft_id -> 404；version 不匹配 -> 409
+  - 边界：confirm 不存在 draft_id -> 404；version 不匹配 -> 409；过期 -> 410(1007)
 """
 
+from datetime import timedelta
+
+from app.db.session import get_db
 from app.models.draft import Draft
 from app.models.goal import Goal
 from app.models.phase import Phase
 from app.models.task import Task
 from app.models.theme import Theme
+from app.services.draft_app_svc import now_utc_naive
 
 _API = "/api/v1"
 
@@ -144,16 +148,32 @@ def test_plans_confirm_nonexistent_draft_returns_404(client):
     assert resp.json()["code"] == 1001
 
 
-def test_plans_confirm_idempotency_after_delete(client):
-    """确认后 draft 已删，二次确认 -> 404，且不重复写入。"""
+def test_plans_confirm_idempotency_after_delete(client, db_session):
+    """确认后 draft 已删，二次确认 -> 404，且不重复写入正式表。"""
     draft_id = _create_draft(client)
     r1 = client.post(f"{_API}/plans/confirm", json={"draft_id": draft_id})
     assert r1.status_code == 200
     r2 = client.post(f"{_API}/plans/confirm", json={"draft_id": draft_id})
     assert r2.status_code == 404
-    # 仅 1 个 goal
-    # (用 client 的 db_session 验证)
-    # 注意：r2 失败不写新 goal
+    assert r2.json()["code"] == 1001
+    # r2 失败不写新 goal：仍仅 1 个 goal
+    assert db_session.query(Goal).count() == 1
+    assert db_session.query(Theme).count() == 1
+    assert db_session.query(Draft).count() == 0
+
+
+def test_plans_confirm_expired_draft_returns_410(client):
+    """draft 过期 -> 410 (code 1007)，doc/04 2.3。"""
+    draft_id = _create_draft(client, content={"goal": {"name": "G"}, "themes": []})
+    # 直接改 DB 把 expires_at 置为过去
+    db = next(client.app.dependency_overrides[get_db]())
+    draft = db.get(Draft, draft_id)
+    draft.expires_at = now_utc_naive() - timedelta(hours=1)
+    db.commit()
+
+    resp = client.post(f"{_API}/plans/confirm", json={"draft_id": draft_id})
+    assert resp.status_code == 410
+    assert resp.json()["code"] == 1007
 
 
 def test_full_flow_put_then_confirm_uses_latest_content(client, db_session):

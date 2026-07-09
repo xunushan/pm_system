@@ -43,4 +43,3 @@ class DraftUpdateRequest(BaseModel):
 class DraftUpdateData(BaseModel):
     draft_id: str
     version: int
-    updated_at: datetime
