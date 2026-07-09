@@ -14,6 +14,10 @@ action_id 硬编码路由（doc/06）：
   story5_标记未完成      -> TaskAppSvc.patch_status（S5：异议 revert，系统填 reason+异步刷卡片）
   story5_确认日终总结    -> DailyAppSvc.confirm_summary（S5：标记 is_confirmed+异步写 daily.md）
   story6_已阅周总结      -> WeeklyAppSvc.confirm_summary（S6：标记 is_confirmed+异步写 weekly.md）
+  story8_确认激活        -> ScheduleAppSvc.activate（S8：阶段衔接激活+即时级联+异步工作空间初始化）
+  story8_暂不激活        -> 记录（no-op，24h 后巡检再提醒）
+  story8_去激活          -> 返回 Story2 激活链接（跳转，非事务）
+  story8_去页面调整       -> 返回 H5 链接（跳转，非事务）
 其余 action_id 保留 TODO，由后续 Story 实现。
 """
 
@@ -26,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.schemas.common import ApiResponse
 from app.schemas.daily import DailyConfirmRequest
-from app.schemas.schedule import ScheduleConfirmRequest
+from app.schemas.schedule import ScheduleActivateRequest, ScheduleConfirmRequest
 from app.schemas.task import PostConfirmWebhookRequest
 from app.services.daily_app_svc import DailyAppSvc
 from app.services.schedule_app_svc import ScheduleAppSvc
@@ -150,5 +154,46 @@ async def feishu_card_callback(
         # 事务后异步：写 weekly.md 快照（3 秒超时内不阻塞）
         background_tasks.add_task(WeeklyAppSvc.write_weekly_md_async, week)
         return ApiResponse(data=data).model_dump()
+
+    # ---- Story8: 主动巡检与阶段衔接 ----
+
+    if action_id == "story8_确认激活":
+        try:
+            req = ScheduleActivateRequest.model_validate(action_value)
+        except ValidationError as e:
+            return {"code": 1002, "message": f"回调参数不合法: {e}", "data": None}
+        # 事务内：UPDATE phase + 即时级联 + audit(forward,supervisor) + COMMIT（<200ms）
+        data = ScheduleAppSvc(db).activate(req.phase_id, req.deadline, req.user_id)
+        # 事务后异步：managed=1 工作空间初始化（3 秒超时内不阻塞）
+        if data.workspace_managed and data.workspace_status == "未初始化":
+            background_tasks.add_task(WorkspaceAppSvc.init, data.workspace_id)
+        return ApiResponse(data=data).model_dump()
+
+    if action_id == "story8_暂不激活":
+        # 记录：不激活，24h 后巡检再提醒（doc/06 表2 story8_暂不激活）
+        phase_id = action_value.get("phase_id", "")
+        import logging
+
+        logging.getLogger(__name__).info(
+            "story8_暂不激活: phase=%s 用户选择暂不激活，24h 后巡检再提醒", phase_id
+        )
+        return {"code": 0, "message": "已记录，24h 后再提醒", "data": {"phase_id": phase_id}}
+
+    if action_id == "story8_去激活":
+        # 跳转：返回 Story2 激活链接（H5/卡片），非执行态事务
+        goal_id = action_value.get("goal_id", "")
+        theme_id = action_value.get("theme_id", "")
+        from app.config import settings
+
+        link = f"{settings.h5_base_url}/schedule?goal_id={goal_id}&theme_id={theme_id}"
+        return {"code": 0, "message": "请前往页面激活", "data": {"link": link}}
+
+    if action_id == "story8_去页面调整":
+        # 跳转：返回 H5 看板链接，非执行态事务
+        phase_id = action_value.get("phase_id", "")
+        from app.config import settings
+
+        link = f"{settings.h5_base_url}/board?phase_id={phase_id}"
+        return {"code": 0, "message": "请前往页面调整", "data": {"link": link}}
 
     return {"code": 0, "message": "noop", "data": None}

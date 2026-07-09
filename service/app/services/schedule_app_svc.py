@@ -12,6 +12,7 @@ doc/04 §3.3 事务 6 步：
 铁律：事务内仅 DB 写 + 即时级联（纯 DB）；mkdir/git init 事务后异步（§3#3/#4）。
 """
 
+from datetime import date
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -32,6 +33,7 @@ from app.repositories.theme import ThemeRepository
 from app.repositories.workspace import WorkspaceRepository
 from app.schemas.schedule import (
     ActivatedPhase,
+    ScheduleActivateData,
     ScheduleConfirmData,
     ScheduleItem,
 )
@@ -173,3 +175,92 @@ class ScheduleAppSvc:
             "workspace_id": workspace_id,
             "ws_status": ws_status,
         }
+
+    # ---- Story8: 阶段衔接激活（doc/04 3.3 POST /schedules/activate）----
+
+    def activate(
+        self, phase_id: str, deadline: date, user_id: str = "supervisor"
+    ) -> ScheduleActivateData:
+        """阶段衔接激活（Story8）：激活指定 phase，复用 S2 激活核心。
+
+        与 confirm 的区别：
+          - activate 激活**指定 phase**（衔接下一阶段），
+            confirm 激活**首个未开始 phase**（首次调度）
+          - triggered_by='supervisor'（doc/04 line 310）
+          - workspace 复用同专题已有 workspace（1:1）；无则建 managed=1
+
+        事务内（doc/04 约 307-312）：
+          1. 校验 phase 存在 + 状态未开始 + 全局进行中 < 3 + 同专题无进行中
+          2. UPDATE phase + state_machine + audit(forward, supervisor)
+          3. 即时级联（激活级联 phase->theme->goal）
+          4. COMMIT
+        事务后异步：managed=1 工作空间初始化（由路由层 BackgroundTasks 调度）。
+        """
+        phase = self.phase_repo.get(phase_id)
+        if phase is None:
+            raise NotFoundError(f"阶段不存在: {phase_id}")
+
+        if phase.status != "未开始":
+            raise ConflictError(f"阶段 {phase_id} 状态为 {phase.status}，仅未开始可激活")
+
+        # 全局进行中 + 本次 <= 3（doc/03 8.9）
+        active_count = self.phase_repo.count_by_status("进行中")
+        if active_count + 1 > MAX_ACTIVE_PHASES:
+            raise QuotaExceededError(
+                f"进行中阶段 {active_count} + 本次 1 超上限 {MAX_ACTIVE_PHASES}"
+            )
+
+        # 同专题不能有进行中 phase（强约束，doc/03 8.9）
+        theme_phases = self.phase_repo.list_by_theme(phase.theme_id)
+        if any(p.status == "进行中" for p in theme_phases):
+            raise ConflictError(f"专题 {phase.theme_id} 已有进行中阶段")
+
+        theme = self.theme_repo.get(phase.theme_id)
+        if theme is None:
+            raise NotFoundError(f"专题不存在: {phase.theme_id}")
+
+        # 事务内：UPDATE phase + 校验状态机 + 审计 + 级联
+        old_status = phase.status
+        state_machine.validate_transition("phase", old_status, "进行中", None)
+        phase.status = "进行中"
+        phase.activated_at = now_utc_naive().date()
+        phase.status_changed_at = now_utc_naive()
+        phase.deadline = deadline
+        audit.log_status_change(
+            self.db,
+            entity_type="phase",
+            entity_id=phase.id,
+            from_status=old_status,
+            to_status="进行中",
+            change_type="forward",
+            triggered_by="supervisor",
+        )
+
+        # workspace：复用同专题已有 workspace（1:1）；无则建 managed=1
+        workspace = self.workspace_repo.get_by_theme(theme.id)
+        if workspace is None:
+            workspace_id = str(uuid4())
+            workspace = Workspace(
+                id=workspace_id,
+                theme_id=theme.id,
+                path=f"data/workspaces/{workspace_id}",
+                managed=True,
+                status="未初始化",
+                type=theme.type,
+            )
+            self.workspace_repo.create(workspace)
+        # 激活级联（phase->theme->goal 未开始->进行中，写 cascade 审计）
+        cascade.cascade_status(self.db, "phase", phase.id)
+
+        # COMMIT（<200ms，事务内无 IO/HTTP）
+        self.db.commit()
+
+        return ScheduleActivateData(
+            phase_id=phase.id,
+            name=phase.name,
+            status=phase.status,
+            deadline=phase.deadline,
+            workspace_id=workspace.id,
+            workspace_managed=workspace.managed,
+            workspace_status=workspace.status,
+        )

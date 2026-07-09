@@ -2,6 +2,7 @@
 
 - 内存 SQLite 用 StaticPool 共享单连接，保证建表对后续请求可见。
 - client fixture 覆盖 get_db 依赖，使请求落到测试 session。
+- autouse fixture 禁用 Supervisor 定时巡检（测试不依赖真实 Redis/线程）。
 """
 
 import pytest
@@ -13,6 +14,30 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
+
+
+@pytest.fixture(autouse=True)
+def _disable_supervisor_scheduler(monkeypatch):
+    """禁用 Supervisor 定时巡检 + 事件分发（测试不依赖真实 Redis/线程时序）。
+
+    - supervisor_enabled=False：scheduler 不启动（lifespan 检查此开关）
+    - dispatch_func=no-op：dispatcher 线程即使启动也不调真实 handler
+    - 事件端到端测试用 dispatch_sync() 直接同步分发，不受此影响
+    """
+    monkeypatch.setattr("app.config.settings.supervisor_enabled", False)
+    from app.supervisor.event_bus import set_dispatch_func
+
+    set_dispatch_func(lambda _event: None)
+    yield
+    set_dispatch_func(None)
+
+
+@pytest.fixture()
+def fake_redis():
+    """fakeredis 客户端（Supervisor 巡检去重测试用）。"""
+    import fakeredis
+
+    return fakeredis.FakeRedis(decode_responses=True)
 
 
 @pytest.fixture()

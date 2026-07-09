@@ -248,6 +248,210 @@ def build_daily_summary_card(
     }
 
 
+def build_phase_linking_card(
+    completed_phase_name: str,
+    next_phase_id: str,
+    next_phase_name: str,
+    suggested_deadline: str,
+    user_id: str = "",
+) -> dict:
+    """构建阶段衔接卡片（doc/03 §3.3 Step3，模板填充，无 LLM）。
+
+    卡片内容：阶段X已完成 -> 下一阶段Y，deadline date_picker。
+    按钮：确认激活 / 暂不激活。
+    回调 action_id：story8_确认激活 / story8_暂不激活。
+    """
+    content = (
+        f"✅ **阶段「{completed_phase_name}」已完成**\n\n"
+        f"下一阶段：**{next_phase_name}**\n"
+        f"建议 deadline：{suggested_deadline}\n\n"
+        f"请确认是否激活下一阶段。"
+    )
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+            "actions": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "content": "确认激活"},
+                    "value": {
+                        "action_id": "story8_确认激活",
+                        "phase_id": next_phase_id,
+                        "deadline": suggested_deadline,
+                        "user_id": user_id,
+                    },
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "content": "暂不激活"},
+                    "value": {
+                        "action_id": "story8_暂不激活",
+                        "phase_id": next_phase_id,
+                        "user_id": user_id,
+                    },
+                },
+            ],
+        },
+    }
+
+
+def build_theme_completed_card(
+    completed_theme_name: str,
+    other_themes: list[dict],
+    user_id: str = "",
+) -> dict:
+    """构建专题完成卡片（doc/03 §3.2，模板填充，无 LLM）。
+
+    卡片内容：专题X已完成 -> 列出同 goal 下未完成的其他专题（单选，专题无序）。
+    用户选后跳 Story2 激活（patch 填 deadline）。
+    """
+    theme_list = (
+        "\n".join(f"· {t['name']}（{t['type']}）" for t in other_themes)
+        or "（该目标下所有专题均已完成）"
+    )
+    content = f"🎉 **专题「{completed_theme_name}」已完成**\n\n其他未完成专题：\n{theme_list}"
+    actions: list[dict] = []
+    for t in other_themes:
+        actions.append(
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "content": f"激活：{t['name']}"},
+                "value": {
+                    "action_id": "story8_去激活",
+                    "theme_id": t["theme_id"],
+                    "user_id": user_id,
+                },
+            }
+        )
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+            "actions": actions,
+        },
+    }
+
+
+def build_goal_completed_card(goal_name: str) -> dict:
+    """构建目标完成通知卡片（纯通知，无按钮）。"""
+    content = f"🎯 **目标「{goal_name}」已全部完成！**\n\n恭喜达成目标。"
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+        },
+    }
+
+
+def build_start_date_reminder_card(
+    goal_id: str,
+    goal_name: str,
+    scheduled_start_date: str,
+    user_id: str = "",
+) -> dict:
+    """构建 scheduled_start_date 到了未激活提醒卡片（doc/06 §I Step4）。"""
+    content = (
+        f"⏰ **计划开始日提醒**\n\n"
+        f"目标：**{goal_name}**\n"
+        f"计划开始日：{scheduled_start_date}\n\n"
+        f"你计划今天开始，要激活吗？"
+    )
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+            "actions": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "content": "去激活"},
+                    "value": {
+                        "action_id": "story8_去激活",
+                        "goal_id": goal_id,
+                        "user_id": user_id,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def build_deadline_reminder_card(
+    phase_id: str,
+    phase_name: str,
+    deadline: str,
+    h5_base_url: str = "",
+    user_id: str = "",
+) -> dict:
+    """构建 deadline 临近提醒卡片（doc/06 §I Step5）。"""
+    content = (
+        f"📅 **deadline 临近**\n\n"
+        f"阶段：**{phase_name}**\n"
+        f"deadline：{deadline}\n\n"
+        f"请注意进度，及时调整。"
+    )
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+            "actions": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "content": "去页面调整"},
+                    "value": {
+                        "action_id": "story8_去页面调整",
+                        "phase_id": phase_id,
+                        "user_id": user_id,
+                    },
+                }
+            ],
+        },
+    }
+
+
+def build_plan_reminder_card(date_str: str) -> dict:
+    """构建未确认计划提醒卡片（doc/06 §I Step6，10:00 巡检）。"""
+    content = f"📋 **今日计划未确认**\n\n日期：{date_str}\n\n请尽快确认今日计划。"
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+        },
+    }
+
+
+def build_summary_reminder_card(date_str: str) -> dict:
+    """构建未做日终总结提醒卡片（doc/06 §I Step7，21:00 巡检）。"""
+    content = f"📝 **今日日终总结未完成**\n\n日期：{date_str}\n\n请尽快完成日终总结。"
+    return {
+        "type": "template",
+        "data": {
+            "template": {
+                "type": "column_set",
+                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+            },
+        },
+    }
+
+
 def _to_json_str(obj: dict) -> str:
     import json
 

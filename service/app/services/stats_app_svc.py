@@ -125,7 +125,7 @@ class StatsAppSvc:
         """周统计查询（只读，无 LLM，无副作用）。
 
         聚合本周（ISO 周）的每日完成趋势、阶段健康度、智能体产出、子任务统计。
-        supervisor_linking_status 占位返回 None（真逻辑由 Story8 Supervisor 填充）。
+        supervisor_linking_status 由 Supervisor 衔接逻辑填充（Story8，查当前衔接下一阶段）。
         """
         start, end = self._parse_week(week)
 
@@ -133,9 +133,12 @@ class StatsAppSvc:
         phase_health = self._query_phase_health()
         agent_output_stats = self._query_agent_output_stats(start, end)
         subtask_stats = self._query_subtask_stats(start, end)
-        # TODO(Story8): Supervisor 衔接状态由 S8 填充，S6 占位 None
+        # Supervisor 衔接状态（Story8：查当前进行中/最近完成阶段的下一阶段）
+        from app.supervisor.linking import get_linking_status
+
+        next_phase_id, suggested_deadline = get_linking_status(self.db)
         supervisor_linking_status = SupervisorLinkingStatus(
-            next_phase=None, suggested_deadline=None
+            next_phase=next_phase_id, suggested_deadline=suggested_deadline
         )
 
         return WeeklyStatsData(
