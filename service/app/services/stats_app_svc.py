@@ -1,23 +1,36 @@
-"""StatsAppSvc：日终/周总结共用统计查询核心（Story5，doc/05 §8.1）。
+"""StatsAppSvc：日终/周总结共用统计查询核心（Story5/Story6，doc/05 §8.1）。
 
 纯查询，无 LLM，无副作用。pm-summary Skill 调用本服务获取统计数据，
 文案与建议由 LLM 生成（Service 不调 LLM，铁律 §3#1）。
 """
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.exceptions import BadRequestError
 from app.core.times import now_utc_naive
+from app.models.daily_record import DailyRecord
 from app.models.daily_task import DailyTask
 from app.models.phase import Phase
+from app.models.subtask import Subtask
 from app.models.task import Task
 from app.models.theme import Theme
+from app.models.workspace_progress import WorkspaceProgress
 from app.repositories.daily_record import DailyRecordRepository
 from app.repositories.phase import PhaseRepository
 from app.repositories.task import TaskRepository
 from app.schemas.stats import DailyStatsData, PhaseHealthItem, TaskStatItem
+from app.schemas.weekly import (
+    AgentOutputStats,
+    DailyStatsItem,
+    DateRange,
+    SubtaskStats,
+    SubtaskStatsItem,
+    SupervisorLinkingStatus,
+    WeeklyStatsData,
+)
 
 # 全局进行中阶段上限（doc/03 8.9）
 MAX_ACTIVE_PHASES = 3
@@ -105,3 +118,115 @@ class StatsAppSvc:
                 )
             )
         return result
+
+    # ---- 周统计（Story6）----
+
+    def get_weekly_stats(self, user_id: str, week: str) -> WeeklyStatsData:
+        """周统计查询（只读，无 LLM，无副作用）。
+
+        聚合本周（ISO 周）的每日完成趋势、阶段健康度、智能体产出、子任务统计。
+        supervisor_linking_status 占位返回 None（真逻辑由 Story8 Supervisor 填充）。
+        """
+        start, end = self._parse_week(week)
+
+        daily_stats = self._query_daily_stats_for_week(start, end)
+        phase_health = self._query_phase_health()
+        agent_output_stats = self._query_agent_output_stats(start, end)
+        subtask_stats = self._query_subtask_stats(start, end)
+        # TODO(Story8): Supervisor 衔接状态由 S8 填充，S6 占位 None
+        supervisor_linking_status = SupervisorLinkingStatus(
+            next_phase=None, suggested_deadline=None
+        )
+
+        return WeeklyStatsData(
+            week=week,
+            date_range=DateRange(start=start, end=end),
+            daily_stats=daily_stats,
+            phase_health=phase_health,
+            agent_output_stats=agent_output_stats,
+            subtask_stats=subtask_stats,
+            supervisor_linking_status=supervisor_linking_status,
+        )
+
+    @staticmethod
+    def _parse_week(week: str) -> tuple[date, date]:
+        """ISO 周字符串 -> (周一, 周日)。如 "2026-W27" -> (2026-06-29, 2026-07-05)。
+
+        用 date.fromisocalendar（Python 3.9+），与 daily_records.week 的 _iso_week 互逆。
+        """
+        parts = week.split("-W")
+        if len(parts) != 2:
+            raise BadRequestError(f"非法 ISO 周格式: {week}（期望如 2026-W27）")
+        try:
+            year, w = int(parts[0]), int(parts[1])
+            start = date.fromisocalendar(year, w, 1)  # 周一
+            end = date.fromisocalendar(year, w, 7)  # 周日
+        except (ValueError, IndexError) as exc:
+            raise BadRequestError(f"非法 ISO 周格式: {week}") from exc
+        return start, end
+
+    def _query_daily_stats_for_week(self, start: date, end: date) -> list[DailyStatsItem]:
+        """本周各天完成趋势（周一~周日逐天，无 daily_record 的天补 0）。"""
+        records = list(
+            self.db.scalars(select(DailyRecord).where(DailyRecord.date.between(start, end)))
+        )
+        record_by_date = {r.date: r for r in records}
+
+        result: list[DailyStatsItem] = []
+        cur = start
+        while cur <= end:
+            rec = record_by_date.get(cur)
+            if rec is not None:
+                rows = self.db.execute(
+                    select(Task.status)
+                    .join(DailyTask, DailyTask.task_id == Task.id)
+                    .where(DailyTask.daily_id == rec.id)
+                ).all()
+                completed = sum(1 for (s,) in rows if s == "已完成")
+                incomplete = sum(1 for (s,) in rows if s != "已完成")
+                result.append(
+                    DailyStatsItem(
+                        date=cur,
+                        is_confirmed=rec.is_confirmed,
+                        completed_count=completed,
+                        incomplete_count=incomplete,
+                    )
+                )
+            else:
+                result.append(
+                    DailyStatsItem(
+                        date=cur, is_confirmed=False, completed_count=0, incomplete_count=0
+                    )
+                )
+            cur += timedelta(days=1)
+        return result
+
+    def _query_agent_output_stats(self, start: date, end: date) -> AgentOutputStats:
+        """本周智能体产出统计（workspace_progress 按 file_type 聚合）。"""
+        rows = list(
+            self.db.scalars(
+                select(WorkspaceProgress).where(WorkspaceProgress.date.between(start, end))
+            )
+        )
+        by_type: dict[str, int] = {}
+        for r in rows:
+            by_type[r.file_type] = by_type.get(r.file_type, 0) + 1
+        return AgentOutputStats(total_files=len(rows), by_type=by_type)
+
+    def _query_subtask_stats(self, start: date, end: date) -> SubtaskStats:
+        """本周子任务统计（前置/后置，按 created_at 在周内过滤）。"""
+        start_dt = datetime.combine(start, datetime.min.time())
+        end_dt = datetime.combine(end, datetime.max.time())
+        subs = list(
+            self.db.scalars(select(Subtask).where(Subtask.created_at.between(start_dt, end_dt)))
+        )
+        pre = [s for s in subs if s.type == "前置"]
+        post = [s for s in subs if s.type == "后置"]
+        return SubtaskStats(pre=self._subtask_item(pre), post=self._subtask_item(post))
+
+    @staticmethod
+    def _subtask_item(subs: list[Subtask]) -> SubtaskStatsItem:
+        total = len(subs)
+        completed = sum(1 for s in subs if s.status == "已完成")
+        pending = sum(1 for s in subs if s.status == "待执行")
+        return SubtaskStatsItem(total=total, completed=completed, pending=pending)

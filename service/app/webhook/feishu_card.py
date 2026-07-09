@@ -13,6 +13,7 @@ action_id 硬编码路由（doc/06）：
   story5_标记完成        -> TaskAppSvc.patch_status（S5：异议 forward，即时级联+异步刷卡片）
   story5_标记未完成      -> TaskAppSvc.patch_status（S5：异议 revert，系统填 reason+异步刷卡片）
   story5_确认日终总结    -> DailyAppSvc.confirm_summary（S5：标记 is_confirmed+异步写 daily.md）
+  story6_已阅周总结      -> WeeklyAppSvc.confirm_summary（S6：标记 is_confirmed+异步写 weekly.md）
 其余 action_id 保留 TODO，由后续 Story 实现。
 """
 
@@ -30,6 +31,7 @@ from app.schemas.task import PostConfirmWebhookRequest
 from app.services.daily_app_svc import DailyAppSvc
 from app.services.schedule_app_svc import ScheduleAppSvc
 from app.services.task_app_svc import TaskAppSvc
+from app.services.weekly_app_svc import WeeklyAppSvc
 from app.services.workspace_app_svc import WorkspaceAppSvc
 
 router = APIRouter()
@@ -135,6 +137,18 @@ async def feishu_card_callback(
         data = DailyAppSvc(db).confirm_summary(daily_id)
         # 事务后异步：写 daily.md 快照（3 秒超时内不阻塞）
         background_tasks.add_task(DailyAppSvc.write_daily_md_async, daily_id)
+        return ApiResponse(data=data).model_dump()
+
+    # ---- Story6: 周总结确认（"已阅"归档，不级联）----
+
+    if action_id == "story6_已阅周总结":
+        week = action_value.get("week")
+        if not week:
+            return {"code": 1002, "message": "回调缺少 week", "data": None}
+        # 事务内：INSERT/UPDATE weekly_records is_confirmed + COMMIT（<200ms）；立即返回
+        data = WeeklyAppSvc(db).confirm_summary(week)
+        # 事务后异步：写 weekly.md 快照（3 秒超时内不阻塞）
+        background_tasks.add_task(WeeklyAppSvc.write_weekly_md_async, week)
         return ApiResponse(data=data).model_dump()
 
     return {"code": 0, "message": "noop", "data": None}
