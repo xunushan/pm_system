@@ -1,20 +1,44 @@
 """任务请求/响应模型。详见《服务API文档 v2.0》3.5。
 
-GET  /tasks/{taskId}              获取任务详情
-POST /tasks/{taskId}/complete      Story4B 标记完成（即时级联，不含后置）
-POST /tasks/{taskId}/post-confirm  Story4B 后置确认（INSERT 后置，可全取消）
+Story4A：
+  GET  /tasks/{taskId}                    任务详情
+  POST /tasks/{taskId}/confirm-complete   人工确认完成（即时级联，无后置）
+  POST /tasks/{taskId}/output/confirm     验收通过智能体产出
+  POST /tasks/{taskId}/output/reject      需要修改（重试/通知）
+  POST /api/callback/opencode/output      OpenCode 产出回调
+  POST /api/callback/opencode/timeout     Redis 超时告警回调
 
-confirm-complete / output 端点属 Story4A，本文件不实现。
+Story4B：
+  POST /tasks/{taskId}/complete           标记完成（即时级联，不含后置）
+  POST /tasks/{taskId}/post-confirm        后置确认（INSERT 后置，可全取消）
 """
 
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
-# ---- POST /tasks/{taskId}/complete ----
+
+class TaskDetailData(BaseModel):
+    """GET /tasks/{taskId} 响应。"""
+
+    task_id: str
+    name: str
+    description: str | None = None
+    status: str
+    executor: str | None = None
+    phase_id: str
+    sort_order: int
+    has_subtask: bool
+    retry_count: int
+    completed_at: datetime | None = None
+
+
+# ---- POST /tasks/{taskId}/complete (Story4B) ----
 
 
 class TaskCompleteRequest(BaseModel):
+    """POST /tasks/{taskId}/complete 请求。"""
+
     user_id: str
 
 
@@ -27,12 +51,14 @@ class CascadeResult(BaseModel):
 
 
 class TaskCompleteData(BaseModel):
+    """POST /tasks/{taskId}/complete 响应。"""
+
     task_id: str
     status: str
     cascade: CascadeResult
 
 
-# ---- POST /tasks/{taskId}/post-confirm ----
+# ---- POST /tasks/{taskId}/post-confirm (Story4B) ----
 
 
 class PostSubtaskInput(BaseModel):
@@ -51,33 +77,122 @@ class PostConfirmRequest(BaseModel):
 
 
 class PostConfirmData(BaseModel):
+    """POST /tasks/{taskId}/post-confirm 响应。"""
+
     task_id: str
     post_subtask_count: int
     async_triggered: bool
 
 
-# ---- GET /tasks/{taskId} ----
-
-
-class TaskDetail(BaseModel):
-    task_id: str
-    name: str
-    description: str | None
-    status: str
-    executor: str | None
-    phase_id: str
-    sort_order: int
-    has_subtask: bool
-    completed_at: datetime | None
-
-
-# ---- 飞书卡片 webhook 请求（含 task_id，无 path 参数）----
-
-
 class PostConfirmWebhookRequest(BaseModel):
-    """story4B_确认后置 / story4B_不需要后置 回调参数。"""
+    """story4B_确认后置 / story4B_不需要后置 回调参数（含 task_id，无 path 参数）。"""
 
     action_id: str
     task_id: str
     user_id: str
     post_subtasks: list[PostSubtaskInput] = Field(default_factory=list)
+
+
+# ---- POST /tasks/{taskId}/confirm-complete (Story4A) ----
+
+
+class ConfirmCompleteRequest(BaseModel):
+    """POST /tasks/{taskId}/confirm-complete 请求。"""
+
+    user_id: str
+
+
+class ConfirmCompleteData(BaseModel):
+    """POST /tasks/{taskId}/confirm-complete 响应。"""
+
+    task_id: str
+    status: str
+    cascade: CascadeResult
+    opencode_restarted: bool
+    next_agent_task: str | None = None
+
+
+# ---- POST /tasks/{taskId}/output/confirm (Story4A) ----
+
+
+class OutputConfirmRequest(BaseModel):
+    """POST /tasks/{taskId}/output/confirm 请求。"""
+
+    user_id: str
+    workspace_progress_ids: list[str] = Field(default_factory=list)
+
+
+class OutputConfirmData(BaseModel):
+    """POST /tasks/{taskId}/output/confirm 响应。"""
+
+    task_id: str
+    status: str
+    cascade: CascadeResult
+
+
+# ---- POST /tasks/{taskId}/output/reject (Story4A) ----
+
+
+class OutputRejectRequest(BaseModel):
+    """POST /tasks/{taskId}/output/reject 请求。"""
+
+    user_id: str
+    feedback: str
+
+
+class OutputRejectData(BaseModel):
+    """POST /tasks/{taskId}/output/reject 响应。"""
+
+    task_id: str
+    retry_count: int
+    max_retry: int = 3
+    action: str  # "retry" / "manual_intervention"
+    async_triggered: bool = False
+    opencode_stopped: bool = False
+    workspace_path: str | None = None
+
+
+# ---- POST /api/callback/opencode/output (Story4A) ----
+
+
+class OpencodeOutputItem(BaseModel):
+    """opencode/output 回调中的单个产出项。"""
+
+    file_path: str
+    file_type: str  # note/code/resource/exercise/design
+    summary: str | None = None
+
+
+class OpencodeOutputCallbackRequest(BaseModel):
+    """POST /api/callback/opencode/output 请求。"""
+
+    task_id: str
+    workspace_id: str
+    outputs: list[OpencodeOutputItem] = Field(default_factory=list)
+    exit_code: int | None = None
+    duration: int | None = None
+
+
+class RecordOutputData(BaseModel):
+    """POST /api/callback/opencode/output 响应。"""
+
+    received: bool
+    progress_count: int
+
+
+# ---- POST /api/callback/opencode/timeout (Story4A) ----
+
+
+class OpencodeTimeoutCallbackRequest(BaseModel):
+    """POST /api/callback/opencode/timeout 请求。"""
+
+    task_id: str
+    workspace_id: str
+    timeout_at: str | None = None
+    expected_callback: str | None = None
+
+
+class TimeoutAlertData(BaseModel):
+    """POST /api/callback/opencode/timeout 响应。"""
+
+    alert_sent: bool

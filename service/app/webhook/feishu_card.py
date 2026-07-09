@@ -8,6 +8,8 @@ action_id 硬编码路由（doc/06）：
   story3_确认今日计划     -> DailyAppSvc.confirm（S3：任务勾选+前置勾选 -> INSERT 3 表）
   story4B_确认后置       -> TaskAppSvc.post_confirm（S4B：INSERT 后置 + 异步执行）
   story4B_不需要后置     -> TaskAppSvc.post_confirm（S4B：全取消，不插入后置）
+  story4A_验收通过       -> TaskAppSvc.output_confirm（S4A：验收通过 -> 标记完成+即时级联）
+  story4A_需要修改       -> TaskAppSvc.output_reject（S4A：重试/通知）
 其余 action_id 保留 TODO，由后续 Story 实现。
 """
 
@@ -84,4 +86,25 @@ async def feishu_card_callback(
         return ApiResponse(data=data).model_dump()
 
     # 其余 action_id 保留 TODO（plan.confirm 走 plans/confirm API，不在此路由）
+
+    if action_id == "story4A_验收通过":
+        task_id = action_value.get("task_id")
+        user_id = action_value.get("user_id", "feishu_user")
+        wp_ids = action_value.get("workspace_progress_ids", [])
+        if not task_id:
+            return {"code": 1002, "message": "回调缺少 task_id", "data": None}
+        data = TaskAppSvc(db).output_confirm(task_id, user_id, wp_ids)
+        return ApiResponse(data=data).model_dump()
+
+    if action_id == "story4A_需要修改":
+        task_id = action_value.get("task_id")
+        user_id = action_value.get("user_id", "feishu_user")
+        feedback = action_value.get("feedback", "")
+        if not task_id:
+            return {"code": 1002, "message": "回调缺少 task_id", "data": None}
+        data = TaskAppSvc(db).output_reject(task_id, user_id, feedback)
+        # 事务后异步：retry 的 dispatch_task + Redis / manual_intervention 的 shutdown + 通知
+        background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, feedback)
+        return ApiResponse(data=data).model_dump()
+
     return {"code": 0, "message": "noop", "data": None}
