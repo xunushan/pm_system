@@ -215,6 +215,105 @@ def test_confirm_no_pre_subtasks(client, db_session):
     assert data["async_triggered"] is False
 
 
+# ===== 回归 #12 #13 =====
+
+
+def test_confirm_then_summary_confirm_succeeds(client, db_session, monkeypatch):
+    """S3 confirm 后 S5 summary/confirm 能成功（200），回归 #12。
+
+    S3 不应误设 is_confirmed=True（否则 S5 永远 409）。
+    """
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    _activate(phases[0])
+    from app.models.task import Task
+
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    db_session.flush()
+
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    # S3: POST /daily/confirm
+    body = {"user_id": "u1", "date": "2026-07-06", "task_ids": [task.id]}
+    resp1 = client.post(f"{_API}/daily/confirm", json=body)
+    assert resp1.status_code == 200, resp1.text
+    daily_id = resp1.json()["data"]["daily_id"]
+
+    # S3 后 is_confirmed=False
+    dr = db_session.query(DailyRecord).one()
+    assert dr.is_confirmed is False
+
+    # S5: POST /daily/summary/confirm -> 200（不 409）
+    with patch.object(daily_app_svc, "write_daily_md"):
+        resp2 = client.post(
+            f"{_API}/daily/summary/confirm",
+            json={"daily_id": daily_id},
+        )
+    assert resp2.status_code == 200, resp2.text
+    assert resp2.json()["data"]["confirmed"] is True
+
+    # S5 后 is_confirmed=True
+    db_session.flush()
+    assert dr.is_confirmed is True
+
+
+def test_confirm_invalid_push_source_returns_422(client, db_session):
+    """非法 push_source -> 422（pydantic Literal 校验），回归 #13。"""
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    _activate(phases[0])
+    from app.models.task import Task
+
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    db_session.flush()
+
+    body = {
+        "user_id": "u1",
+        "date": "2026-07-06",
+        "task_ids": [task.id],
+        "push_source": "card",  # 非法值
+    }
+    resp = client.post(f"{_API}/daily/confirm", json=body)
+    assert resp.status_code == 422
+    # 确保没有写入 DB
+    assert db_session.query(DailyRecord).count() == 0
+
+
+def test_webhook_story3_invalid_push_source_returns_1002(client, db_session, monkeypatch):
+    """webhook story3 非法 push_source -> code 1002（ValidationError 捕获），回归 #13。"""
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    _activate(phases[0])
+    from app.models.task import Task
+
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    db_session.flush()
+
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    payload = {
+        "action": {
+            "value": {
+                "action_id": "story3_确认今日计划",
+                "user_id": "u1",
+                "date": "2026-07-06",
+                "task_ids": [task.id],
+                "pre_subtasks": [],
+                "push_source": "card",  # 非法值
+            }
+        }
+    }
+    resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 1002
+    assert db_session.query(DailyRecord).count() == 0
+
+
 # ===== webhook =====
 
 

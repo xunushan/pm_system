@@ -210,10 +210,10 @@ def test_confirm_inserts_three_tables(db_session):
     assert data.async_triggered is True
     assert data.date == _TODAY
 
-    # daily_records
+    # daily_records（is_confirmed 应为 False，S5 日终确认时才置 true）
     dr = db_session.query(DailyRecord).one()
-    assert dr.is_confirmed is True
-    assert dr.confirmed_at is not None
+    assert dr.is_confirmed is False
+    assert dr.confirmed_at is None
     assert dr.date == _TODAY
     assert dr.week.startswith("2026-W")
 
@@ -365,6 +365,37 @@ def test_confirm_subtask_sort_order_increments(db_session):
     assert len(subs) == 2
     assert subs[0].sort_order == 1
     assert subs[1].sort_order == 2
+
+
+def test_confirm_does_not_set_is_confirmed_then_summary_succeeds(db_session):
+    """S3 confirm 后 is_confirmed=False，S5 confirm_summary 能成功（不 409）。
+
+    回归 #12：S3 误设 is_confirmed=True 导致 S5 永远 409。
+    """
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    _activate_phase(phases[0])
+    from app.models.task import Task
+
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    db_session.flush()
+
+    # S3 confirm
+    data = _confirm(db_session, [task.id])
+    assert data.task_count == 1
+
+    # S3 后 is_confirmed=False（默认，S5 才置 true）
+    dr = db_session.query(DailyRecord).one()
+    assert dr.is_confirmed is False
+    assert dr.confirmed_at is None
+
+    # S5 confirm_summary 能成功（不 409）
+    summary = DailyAppSvc(db_session).confirm_summary(data.daily_id)
+    assert summary.confirmed is True
+
+    # S5 后 is_confirmed=True
+    db_session.flush()
+    assert dr.is_confirmed is True
+    assert dr.confirmed_at is not None
 
 
 # ===== opencode 桩调用验证 =====
