@@ -30,6 +30,17 @@ class FeishuClient:
         self.app_secret = settings.feishu_app_secret
         self._token: str | None = None
 
+    def _is_configured(self) -> bool:
+        """飞书是否已配置（app_id 非空）。
+
+        未配置时记 warning 并返回 False，调用方应 graceful skip（不调 httpx），
+        避免 app_id 为空时仍请求 token API 触发 KeyError（issue #14）。
+        """
+        if not self.app_id:
+            logger.warning("飞书未配置（FEISHU_APP_ID 为空），跳过推送")
+            return False
+        return True
+
     def _get_token(self) -> str:
         """获取 tenant_access_token（缓存简单实现）。"""
         if self._token:
@@ -48,6 +59,8 @@ class FeishuClient:
 
     def send_card(self, chat_id: str, card: dict) -> str | None:
         """发送交互卡片，返回 message_id。"""
+        if not self._is_configured():
+            return None
         resp = httpx.post(
             f"{_FEISHU_API}/im/v1/messages",
             headers=self._headers(),
@@ -65,6 +78,8 @@ class FeishuClient:
 
     def update_card(self, message_id: str, card: dict) -> None:
         """更新已发送的卡片（8.5）。"""
+        if not self._is_configured():
+            return None
         resp = httpx.patch(
             f"{_FEISHU_API}/im/v1/messages/{message_id}",
             headers=self._headers(),
@@ -75,6 +90,8 @@ class FeishuClient:
 
     def send_text(self, chat_id: str, text: str) -> str | None:
         """发送文本消息，返回 message_id。"""
+        if not self._is_configured():
+            return None
         resp = httpx.post(
             f"{_FEISHU_API}/im/v1/messages",
             headers=self._headers(),
@@ -92,6 +109,8 @@ class FeishuClient:
 
     def send_file(self, chat_id: str, file_path: str) -> str | None:
         """发送文件消息（逐个发送产出文件到飞书，doc/06 步骤6）。"""
+        if not self._is_configured():
+            return None
         # 先上传文件获取 file_key
         import os
 
