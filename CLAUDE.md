@@ -39,6 +39,7 @@
 8. **executor 规划态不填**。任务规划时 executor=NULL，pm-daily 按专题 type 推断填入（learning/research/source→human；dev/survey→agent）。
 9. **前置整体 / 后置脱钩**。前置按今日整体生成（与任务解耦，任务勾选变化**不**重生成前置）；后置按单个任务生成且和完成脱钩（完成即时级联，后置可全取消）。
 10. **专题无序 + 阶段强约束**。专题无 sort_order；阶段按 sort_order 顺序激活，自动锁定第 1 个未开始阶段。
+11. **卡片全生命周期归 Service**（doc/07 D25）。Service 拥有构建（build_*_card）+ 发送（send_card/update_card/send_file）+ 回调路由（/webhook action_id）+ 点击后刷新（update_card 重建整张卡）；Skill 只调 Service 推卡方法。开发期 Skill 缺位时，"Skill 推卡"场景必须有等价 Service 推卡方法兜底。所有回调点击后必须 update_card（按钮灰化/反转/消失，禁止"点击后卡片不变"），message_id 由 build_*_card 写入按钮 value。按钮置于对应项旁（per-item），禁止全挤一个 action 块。
 
 ## 四、代码规范
 

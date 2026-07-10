@@ -1,66 +1,61 @@
 # 开发进度
 
-> 详细历史见 `archive/PROGRESS_v1_history.md`（9/9 Story 开发 + 端到端验证 v1 全记录，仅供审计）。
+> 本文件只维护"阶段状态 + 上阶段关键问题(精简) + 当前计划追踪区(高频更新) + 参考索引"。
+> 详情不抄这里：决策见 doc/07，教训见 doc/08，e2e 用例见 tests/e2e/TEST_PLAN.md，v1 历史见 archive/。
 
-## 当前状态（2026-07-10）
+## 一、阶段状态
 
-服务层 9/9 Story 已合并 main（539 测试绿，7 迁移，14 表）。端到端卡片交互测试 v1 暴露 6 个问题，已归档，现进入 v2。
+- **上一阶段**：Service 开发 9/9 Story 合并 main（539 测试绿，7 迁移，14 表）+ 6 修复 PR。端到端验证 v1 全 Story 卡片交互不合格。
+- **当前阶段**：v2 修复 + 端到端验证（进行中）
+- **完成信号**：每个含卡 Story = unit/integration 绿(CI) + 契约绿(CI) + e2e 该 Story 用例真跑过(手动)。三者齐全才算完成。
 
-## v1 交代（为何重来）
+## 二、上阶段关键问题（精简，详见 doc/08）
 
-首轮端到端卡片测试失败，核心问题：
-1. **架构理解错**：卡片构建/推送应是 Service 职责，非 Skill。S2/S3/S6/S8 缺 Service 推卡入口。
-2. **卡片点击后不更新**：webhook 回调后不 update_card，用户看到旧卡、按钮可重复点、状态无反馈。
-3. **卡片样式问题**：按钮堆一起不挨任务，点击后状态在卡上不变。
-4. **测试作弊**：脚本模拟点击 + 手动改 DB，掩盖失败。
-5. **opencode 未启动**：S4A 执行链依赖 opencode serve，测试时没起。
-6. **S1 未走 draft 流程**：直接 plans/confirm，draft 表空。
+| # | 问题 | 性质 | 详见 |
+|---|------|------|------|
+| 1 | 设计文档对"卡片归谁"自相矛盾，子 agent 选错边 | 根因 | doc/08 L1 / doc/07 D25 |
+| 2 | 495 测试全绿 ≠ 系统能用（测试金字塔缺 e2e 顶层）| 根因 | doc/08 L2 |
+| 3 | 卡片结构测只查 dict 键，飞书拒收才发现 | 缺口 | doc/08 L3 |
+| 4 | 基础设施(webhook/redis/app_id)最后才配，全程无真实反馈 | 根因 | doc/08 L4 |
+| 5 | 测试脚本绕真实入口 + 手改 DB 掩盖失败 | 方法错 | doc/08 L5 |
+| 6 | 异步副作用(update_card)被 mock 掉且不断言 | 缺口 | doc/08 L6 |
+| 7 | S5 update_card 坏：build_daily_summary_card 的 value 不含 message_id，回调取恒空 | 真 bug | FIX-1 |
+| 8 | S4A 主任务不下发：daily_app_svc.py:399 start_agent_serve 不传 task | 真 bug | FIX-2 |
 
-旧脚本见 `archive/e2e_test_v1/`，v1 临时改动已 stash（`e2e-v1: chat_id fix + push_daily_summary entry`）。
+完整 v1 历史：`archive/PROGRESS_v1_history.md`（审计用）。
 
-## v2 计划（进行中）
+## 三、当前阶段计划与追踪（唯一高频更新区）
 
-原则：Service 封装卡片全链路（构建+推送+回调+点击后 update_card 重构整张卡），真实 opencode，按 Story 顺序不跳，禁止改 DB，真实点击。
+### 对齐（文档/规范层）— 已完成
+- [x] D25 卡片全生命周期归 Service -> doc/07
+- [x] 同步 doc/03 §1.2（消除「❌ Service」一刀切）
+- [x] CLAUDE.md 铁律加第 11 条
+- [x] 新建 doc/08 教训文档（含测试三分概念划分）
 
-### v2 前置改造（拆小 PR 逐个）
+### 修复（代码层）
+- [ ] **FIX-1**：S5 message_id 传递（build_daily_summary_card 的 button value 写入 message_id；回调读取）
+- [ ] **FIX-2**：S4A 主任务下发（daily_app_svc.py:399 传 task 参数给 start_agent_serve）
+- [ ] **FIX-3**：补 5 个 builder（S1 总览/S2 调度/S3 今日计划/S4B 任务完成/S6 周总结）
+- [ ] **FIX-4**：补 Service 推卡入口（S2 ScheduleAppSvc / S3 DailyAppSvc / S6 WeeklyAppSvc / S1）
+- [ ] **FIX-5**：全回调 update_card 统一（按钮灰化/反转/消失）+ 按钮挨任务 per-item 样式
+- [ ] **PR-1**（独立小修）：chat_id_placeholder 修复（task_app_svc 4 处 -> DEFAULT_CHAT_ID）
 
-- [ ] **PR-1**：chat_id_placeholder 修复（task_app_svc 4 处硬编码 -> DEFAULT_CHAT_ID，v1 stash 里有）
-- [ ] **PR-2**：卡片更新机制（webhook 回调后 update_card 重构整张卡）+ 样式重构（按钮挨任务、状态体现）
-- [ ] **PR-3**：Service 推卡入口补全（S2/S3/S6/S8）
-- [ ] **PR-4**：S1 draft 真实流程 + opencode serve 启动脚本
+### 端到端验证
+- [ ] tests/e2e/TEST_PLAN.md 定稿（每用例 7 字段：前置/数据准备/步骤/卡片预期/DB预期/禁止项/通过判据）
+- [ ] tests/e2e/test_infra.py 冒烟（token/推卡/回调到达/opencode 起/redis ping）
+- [ ] 起真实 opencode serve（port 18800）
+- [ ] S1 -> S9 逐项真测（真实推卡 + 真实点击 + 禁止改 DB + 真实 opencode）
 
-### v2 测试计划（按 Story 顺序，纠正后）
+### 进度日志
+- 2026-07-10：复盘完成（七问 + 3 agent 证据），文档对齐落地（D25/doc/08/doc/03/CLAUDE.md）。
 
-| Story | 卡片 | 推卡触发 | 点击场景 | 点击后 | DB 断言 |
-|-------|------|---------|---------|--------|---------|
-| S1 | 总览卡（draft 确认） | Service push | 确认方案 | update_card 置灰 | draft 写入+落库+删 |
-| S2 | 调度激活卡 | Service push | 确认调度 | update_card | phase 激活+workspace |
-| S3 | 今日计划卡 | Service push | 确认今日计划 | update_card | daily_records 写入 |
-| S4A | 验收卡 | opencode 产出触发 | **场景1 验收通过** + **场景2 需要修改（feedback 输入框）** | update_card | task 完成+级联 / 重试 |
-| S4B | 任务完成确认卡（带后置勾选） | Service push | 确认后置 / 不需要后置 | update_card | 后置 subtasks |
-| S5 | 日终总结卡 | Service push | 标记完成/未完成 + 确认日终总结 | update_card 实时更新 | task 状态+is_confirmed |
-| S6 | 周总结卡（周日 12:00 定时） | scheduler 定时 | 已阅 | update_card 置灰 | weekly_records+weekly.md |
-| S8 | 阶段衔接卡 | supervisor phase_completed 事件 | 确认激活/暂不激活 | update_card | phase 激活 |
-| S9 | 无卡 | board API | - | - | board 编辑/回退 |
+## 四、参考索引（只放链接，不抄内容）
 
-**纠正（v1 误读 doc/01）**：
-- S4B 是「任务完成确认卡」（人执行任务完成后推，卡里带后置勾选），不是"后置确认卡"。缺 builder。
-- S4A 两个场景：验收通过 + 需要修改（feedback 输入框，v1 移除了，PR-2 补回）。
-- S6 是周总结卡（周日 12:00 定时推），不是 build_theme_completed（那是 S8 衔接，theme_completed 事件）。S6 和 supervisor 仅数据参考（下周建议参考衔接状态）。缺 builder + scheduler 定时。
-
-**v2 前置改造需补的 builder**：
-- S4B `build_task_complete_card`（任务完成确认 + 后置勾选 + 确认/不需要按钮）
-- S6 `build_weekly_summary_card`（周总结，含每日回顾/阶段健康/产出/下周建议 + 已阅按钮）
-- S4A `build_verification_card` 补回 feedback input 组件（issue #20）
-
-### v2 进度
-
-- [ ] 前置改造（PR-1 ~ PR-4）
-- [ ] S1-S9 逐项测试（真实点击，禁止改 DB）
-
-## 关键参考
-
-- `archive/PROGRESS_v1_history.md`：9/9 Story 开发全记录 + 端到端 v1 验证（审计）
-- `archive/e2e_test_v1/`：v1 测试脚本（已废弃）
-- 设计文档 `doc/`（只读）
-- P0 opencode 重写方案见 `archive/e2e_test_v1/P0_opencode_修复方案.md`（已实现，PR #19 合并）
+- 设计决策：`doc/07_决策文档_v1.0.md`（D1-D25）
+- 教训：`doc/08_教训文档.md`（L1-L6 + 测试三分 + 行业标准）
+- e2e 测试用例：`service/tests/e2e/TEST_PLAN.md`（第③步建）
+- v1 完整历史：`archive/PROGRESS_v1_history.md`
+- v1 测试脚本（废弃）：`archive/e2e_test_v1/`
+- 设计文档：`doc/`（只读）
+- 代码进度表：`service/app/models/__init__.py` 的 ✅/⬜
+- 测试三分与 CI 门禁：doc/08 第二节
