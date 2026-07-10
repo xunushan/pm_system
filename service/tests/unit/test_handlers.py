@@ -26,9 +26,13 @@ class FakeFeishu:
 
 
 def _extract_action_ids(card):
-    """从卡片提取所有 action_id。"""
-    actions = card.get("data", {}).get("actions", [])
-    return [a.get("value", {}).get("action_id") for a in actions if isinstance(a, dict)]
+    """从卡片提取所有 action_id（飞书官方格式：elements 里的 action block）。"""
+    action_ids = []
+    for el in card.get("elements", []):
+        if el.get("tag") == "action":
+            for btn in el.get("actions", []):
+                action_ids.append(btn.get("value", {}).get("action_id"))
+    return action_ids
 
 
 def test_on_phase_completed_pushes_linking_card(db_session, fake_redis):
@@ -131,9 +135,9 @@ def test_on_goal_completed_pushes_notification(db_session):
     on_goal_completed(goal.id, db=db_session, feishu=feishu)
 
     assert len(feishu.cards) == 1
-    # 纯通知，无 actions
-    actions = feishu.cards[0]["card"].get("data", {}).get("actions", [])
-    assert actions == []
+    # 纯通知，无 action block（无按钮）
+    action_ids = _extract_action_ids(feishu.cards[0]["card"])
+    assert action_ids == []
 
 
 def test_on_goal_completed_goal_not_exists(db_session):
