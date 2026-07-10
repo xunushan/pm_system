@@ -176,3 +176,77 @@ S1 规划（基石）
 - 539 测试绿，7 迁移（含 session_id），14 表
 - 无 open PR，仅 issue #20 open（P2 跟踪）
 
+---
+
+## 端到端卡片交互测试 v1 归档（2026-07-10）
+
+> 首轮真实卡片测试失败，归档问题。旧脚本见 `archive/e2e_test_v1/`，仅供审计。
+
+### v1 暴露的问题（6 项，用户反馈已确认）
+
+1. **架构理解错误**：误以为卡片拼装是 Skill 职责（Skill 用 CardKit 拼），Service 只提供数据。**实际应为：Service 封装卡片构建+推送+回调处理+点击后更新卡片全链路，Skill 只调 Service**。导致 S2/S3/S6/S8 缺 Service 推卡入口，测试时手动构卡掩盖真实流程缺失。
+2. **卡片点击后不更新**：webhook 回调处理后不 update_card（仅 S5 异议有 refresh_summary_card_async）。导致用户点击后看原卡片、按钮可重复点、卡片上任务状态无变化。
+3. **卡片样式问题**（日终总结卡）：所有"标记完成/未完成/确认"按钮堆一个 action block，不挨着任务；点击后任务状态在卡上无变化。
+4. **测试过程作弊**：脚本模拟点击 + 手动改 DB（填 executor、改 task 状态），掩盖失败。**真实测试禁止手动改 DB**。
+5. **opencode 未启动**：S4A 智能体执行链依赖 opencode serve，测试时没起，retry/dispatch 失败被忽略。
+6. **S1 草稿未写 draft 表**：测试数据准备直接 plans/confirm，没走"先写 draft 再 confirm"真实流程，draft 表空。
+
+### v1 临时改动（已 stash，待重新设计）
+
+- task_app_svc.py：chat_id_placeholder -> DEFAULT_CHAT_ID（4 处，真 bug 修复，保留）
+- daily_app_svc.py + daily.py：加 push_daily_summary_card 方法+端点（测试用入口，**重新审视**：推卡入口应统一设计，不应单独加）
+- stash ref: `stash@{0}: e2e-v1: chat_id fix + push_daily_summary entry`
+
+### v1 仅验证通过（Service 层 API + DB，非真实卡片流程）
+
+- S1 plans/confirm 落库（但 draft 流程缺失）
+- S2 schedules/confirm 激活级联
+- S3 daily/confirm 写 daily_records/daily_tasks
+- S4A output_confirm task->已完成（webhook 路由通）
+- S5 patch_status 异议双向 forward/revert + confirm_summary
+- supervisor phase_completed 事件 -> Redis 记录
+
+### v1 未真正验证（被掩盖）
+
+- 所有卡片点击后的视觉反馈（不 update_card）
+- 卡片样式（按钮布局）
+- S4A opencode 真实执行链（opencode 没起）
+- S2/S3/S6/S8 Service 推卡入口（缺失，手动构卡掩盖）
+- S1 draft 真实流程
+
+---
+
+## 端到端卡片交互测试 v2 计划（2026-07-10，进行中）
+
+> 重新设计：Service 封装卡片全链路（构建+推送+回调+更新），真实 opencode，按 Story 顺序不跳，禁止改 DB。
+
+### v2 前置改造（Service 卡片全链路封装）
+
+待实现（worktree 子 agent 或主会话）：
+- [ ] **卡片点击后更新**：所有 webhook 回调处理事务后，异步 update_card 刷新卡片（状态变化反映到卡上，按钮置灰/消失）。统一抽 `_refresh_card_async` 模式。
+- [ ] **卡片样式重构**：按钮挨着对应任务（每任务一组 action block），不堆一起。状态在卡上体现（已完成✅/未完成❌，对应按钮消失）。
+- [ ] **Service 推卡入口补全**：S2（调度激活卡）、S3（今日计划卡）、S6（专题完成卡）、S8（衔接卡，已有 supervisor 事件触发）补 Service 层推卡方法，Skill 调用。
+- [ ] **S1 draft 真实流程**：规划数据先写 draft，confirm 时读 draft 落库删 draft。
+- [ ] **opencode serve 启动**：S4A 测试前启动 opencode serve（端口 18800），真实执行链。
+- [ ] **chat_id_placeholder 修复**：task_app_svc 4 处硬编码改 DEFAULT_CHAT_ID（v1 stash 里，重新应用）。
+
+### v2 测试计划（按 Story 顺序，不跳，真实点击，禁止改 DB）
+
+| Story | 卡片 | 推卡触发 | 点击按钮 | 点击后卡片更新 | DB 断言 |
+|-------|------|---------|---------|--------------|---------|
+| S1 | 总览卡（draft 确认） | Service push | 确认方案 | 卡片置灰 | draft 写入+落库+删 draft |
+| S2 | 调度激活卡 | Service push | 确认调度 | 卡片置灰 | phase 激活+workspace |
+| S3 | 今日计划卡 | Service push | 确认今日计划 | 卡片置灰 | daily_records 写入 |
+| S4A | 验收卡 | opencode 产出触发 | 验收通过/需要修改 | 卡片更新 | task 完成+级联 |
+| S4B | 后置确认卡 | Service push | 确认后置/不需要 | 卡片置灰 | 后置 subtasks |
+| S5 | 日终总结卡 | Service push | 标记完成/未完成/确认 | 卡片实时更新状态 | task 状态+is_confirmed |
+| S6 | 专题完成卡 | supervisor 事件 | 已阅 | 卡片置灰 | weekly_records |
+| S8 | 阶段衔接卡 | supervisor 事件 | 确认激活/暂不激活 | 卡片置灰 | phase 激活 |
+| S9 | 无卡（board API） | - | - | - | board 编辑/回退 |
+
+### v2 进度
+
+- [ ] 前置改造（Service 卡片全链路）
+- [ ] S1-S9 逐项测试
+
+
