@@ -295,7 +295,7 @@ class DailyAppSvc:
 
         事务5步（doc/04 §3.4）：
           1. 校验 task_ids 属于已激活未暂停阶段 + 当日未确认过
-          2. INSERT daily_records（is_confirmed=true）
+          2. INSERT daily_records（is_confirmed=false，S5 日终确认时才置 true）
           3. INSERT daily_tasks（UNIQUE 冲突 -> 409）
           4. INSERT subtasks（勾选的前置，type=前置，status=待执行）
           5. COMMIT（<200ms）
@@ -317,8 +317,6 @@ class DailyAppSvc:
             date=date_,
             week=_iso_week(date_),
             push_source=push_source,
-            is_confirmed=True,
-            confirmed_at=now_utc_naive(),
         )
         self.daily_repo.create(daily)
 

@@ -5,6 +5,7 @@ POST /daily/confirm       确认今日计划（任务勾选+前置勾选 -> INSE
 """
 
 from datetime import date
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -62,7 +63,7 @@ class DailyConfirmRequest(BaseModel):
     date: date
     task_ids: list[str] = Field(..., min_length=1)
     pre_subtasks: list[PreSubtaskInput] = Field(default_factory=list)
-    push_source: str = "manual"  # auto / manual
+    push_source: Literal["auto", "manual"] = "manual"
 
 
 class DailyConfirmData(BaseModel):
