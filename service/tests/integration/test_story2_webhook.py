@@ -82,4 +82,3 @@ def test_webhook_url_verification_echoes_challenge(client):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body == {"challenge": challenge}
-
