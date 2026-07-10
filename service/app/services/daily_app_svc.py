@@ -386,17 +386,22 @@ class DailyAppSvc:
                     [{"id": s.id, "name": s.name, "task_id": s.task_id} for s in pre_subs]
                 )
 
-            # agent-type 任务 -> start_agent_serve
+            # agent-type 任务 -> start_agent_serve（逐任务下发首任务）
+            # select Task 以构造 task dict（含 task_id/name/phase_id），
+            # 循环对每个 agent 任务 dispatch（start_agent_serve 内部 start_serve 幂等、
+            # _ensure_session 按 workspace 复用，多任务同 workspace 安全）。
             agent_rows = db.execute(
-                select(Workspace, Theme.type)
+                select(Workspace, Task)
                 .join(Theme, Workspace.theme_id == Theme.id)
                 .join(Phase, Phase.theme_id == Theme.id)
                 .join(Task, Task.phase_id == Phase.id)
                 .where(Task.id.in_(task_ids), Theme.type.in_(tuple(_AGENT_TYPES)))
             ).all()
-            if agent_rows:
-                ws, _ = agent_rows[0]
-                client.start_agent_serve(ws.id)
+            for ws, task in agent_rows:
+                client.start_agent_serve(
+                    ws.id,
+                    {"task_id": task.id, "name": task.name, "phase_id": task.phase_id},
+                )
         except Exception:
             logger.exception("daily trigger_async 失败: %s", daily_id)
         finally:

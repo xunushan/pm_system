@@ -362,7 +362,7 @@ def _card_value(action_id, **kwargs):
 
 
 def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
-    """webhook story5_标记完成 -> PATCH forward + 异步刷卡片。"""
+    """webhook story5_标记完成 -> PATCH forward + 异步刷卡片（message_id fallback）。"""
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=0
     )
@@ -372,7 +372,7 @@ def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
-    with patch.object(task_app_svc.FeishuClient, "update_card"):
+    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
         payload = _card_value(
             "story5_标记完成",
             task_id=tasks[0].id,
@@ -389,9 +389,13 @@ def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
     db_session.flush()
     assert tasks[0].status == "已完成"
 
+    # FIX-1 回归：update_card 收到正确的 message_id（fallback 自 action.value）
+    mock_update.assert_called_once()
+    assert mock_update.call_args[0][0] == "msg_001"
+
 
 def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
-    """webhook story5_标记未完成 -> PATCH revert + 异步刷卡片。"""
+    """webhook story5_标记未完成 -> PATCH revert + 异步刷卡片（message_id fallback）。"""
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=1
     )
@@ -406,7 +410,7 @@ def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
-    with patch.object(task_app_svc.FeishuClient, "update_card"):
+    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
         payload = _card_value(
             "story5_标记未完成",
             task_id=tasks[0].id,
@@ -423,6 +427,70 @@ def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
     db_session.flush()
     assert tasks[0].status == "待执行"
     assert phases[0].status == "进行中"
+
+    # FIX-1 回归：update_card 收到正确的 message_id（fallback 自 action.value）
+    mock_update.assert_called_once()
+    assert mock_update.call_args[0][0] == "msg_001"
+
+
+def test_webhook_story5_message_id_from_payload_top(client, db_session, monkeypatch):
+    """FIX-1: message_id 优先从 payload 顶层取（飞书回调含被点击卡片的 open_message_id）。
+
+    飞书卡片按钮点击回调，payload 顶层含被点击卡片的消息标识。action.value 里
+    不含 message_id（build_daily_summary_card 构造的按钮 value 无此字段），必须从
+    payload 顶层取，否则恒空串导致 update_card 指向无效 URL、卡片刷新坏掉。
+    """
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=0
+    )
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
+        payload = _card_value(
+            "story5_标记完成",
+            task_id=tasks[0].id,
+            daily_id=daily.id,
+        )
+        # message_id 放 payload 顶层（飞书回调实际结构），action.value 里不带
+        payload["open_message_id"] = "om_top_level_msg"
+        resp = client.post(_WEBHOOK, json=payload)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["code"] == 0
+
+    # update_card 被调用且 message_id 来自 payload 顶层 open_message_id
+    mock_update.assert_called_once()
+    assert mock_update.call_args[0][0] == "om_top_level_msg"
+
+
+def test_webhook_story5_message_id_from_payload_message_id_field(client, db_session, monkeypatch):
+    """FIX-1: payload 顶层 open_message_id 缺失时，取 payload 顶层 message_id。"""
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=0
+    )
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
+        payload = _card_value(
+            "story5_标记完成",
+            task_id=tasks[0].id,
+            daily_id=daily.id,
+        )
+        # 顶层用 message_id 字段（非 open_message_id）
+        payload["message_id"] = "top_msg_id"
+        resp = client.post(_WEBHOOK, json=payload)
+
+    assert resp.status_code == 200, resp.text
+    mock_update.assert_called_once()
+    assert mock_update.call_args[0][0] == "top_msg_id"
 
 
 def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
