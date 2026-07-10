@@ -23,7 +23,8 @@
 | 04_服务API文档_v2.0.md | REST 接口 + webhook + drafts |
 | 05_Skill设计文档_v2.0.md | 5 Skill 职责边界 |
 | 06_操作流程与技术动作清单_v2.0.md | 每 Story 操作流程 + 指令/卡片/H5/定时表 |
-| 07_决策文档_v1.0.md | 历轮决策记录（D1-D24） |
+| 07_决策文档_v1.0.md | 历轮决策记录（D1-D25，含推翻项） |
+| 08_教训文档.md | v2 验证教训 L1-L6 + 测试三分 + 行业标准 + 检查清单 |
 
 **实现任何功能前，先读对应文档章节。**
 
@@ -39,6 +40,7 @@
 8. **executor 规划态不填**。任务规划时 executor=NULL，pm-daily 按专题 type 推断填入（learning/research/source→human；dev/survey→agent）。
 9. **前置整体 / 后置脱钩**。前置按今日整体生成（与任务解耦，任务勾选变化**不**重生成前置）；后置按单个任务生成且和完成脱钩（完成即时级联，后置可全取消）。
 10. **专题无序 + 阶段强约束**。专题无 sort_order；阶段按 sort_order 顺序激活，自动锁定第 1 个未开始阶段。
+11. **卡片全生命周期归 Service**（doc/07 D25）。Service 拥有构建（build_*_card）+ 发送（send_card/update_card/send_file）+ 回调路由（/webhook action_id）+ 点击后刷新（update_card 重建整张卡）；Skill 只调 Service 推卡方法。开发期 Skill 缺位时，"Skill 推卡"场景必须有等价 Service 推卡方法兜底。所有回调点击后必须 update_card（按钮灰化/反转/消失，禁止"点击后卡片不变"）；message_id 优先从飞书回调 payload 顶层取（飞书卡片回调含被点击卡片的 message_id），fallback 从 action_value 取（待 e2e TC-S5-01 实测确认取法）。按钮置于对应项旁（per-item），禁止全挤一个 action 块。
 
 ## 四、代码规范
 
