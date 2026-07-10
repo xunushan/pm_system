@@ -134,3 +134,45 @@ S1 规划（基石）
 - S2 调度激活：✅ 已合并（见上）。
 - S7 子任务配置：✅ 已解锁（仍可派发）。
 - 并行窗口 1（{S2‖S7}）：S2 已合，S7 可独立做。
+
+---
+
+## 端到端集成验证（2026-07-10，9/9 Story 合并后）
+
+服务层 9/9 Story 全合并后，做真实端到端验证（真实 Redis + 真实 SQLite 文件 + 真实 opencode serve 1.17.16 实测 + ngrok 公网 + 真实飞书 token + 个人 open_id）。**单测全绿不等于端到端能跑通**，本轮发现并修复 6 个问题（5 开 PR + 1 直接提交）。
+
+### 验证通过项
+- S1 规划确认 -> S2 调度激活 -> S3 今日计划 -> S4B 人完成 -> S5 日终 -> S6 周总结 -> S8 衔接激活 -> S9 看板编辑/回退：API 串联全通
+- **supervisor 真实事件分发**：emit phase_completed -> daemon thread 消费 -> on_phase_completed handler -> Redis 写 `supervisor:linking:pushed:{phase_id}`（真实 Redis，非 fakeredis）
+- **飞书推卡链路**：凭据有效（换到 tenant_access_token）+ ngrok 公网 + open_id，send_text/send_card 均真实收到
+
+### 发现并修复的问题（6 项）
+| PR/commit | 严重度 | 问题 | 修复 |
+|-----------|--------|------|------|
+| #15 (8ade308) | P1 | S3 误设 is_confirmed=True，S5 日终确认永远 409 | 删除 is_confirmed=True（model 默认 False） |
+| #15 (8ade308) | P2 | 非法 push_source 返回 500（IntegrityError 穿透） | schema 改 Literal["auto","manual"] |
+| #16 (b165383) | P3 | feishu app_id 空时仍调 API -> KeyError | 加 _is_configured skip |
+| #17 (ffe1ddb) | P1 | webhook 未处理 url_verification 验签，飞书报"Challenge code 没有返回" | 开头加 url_verification 原样回 challenge |
+| #17 (ffe1ddb) | - | DEFAULT_CHAT_ID 硬编码占位 + receive_id_type 硬编码 chat_id（推个人 open_id 失败） | config 加 feishu_default_chat_id + _receive_id_type 自动识别 ou_/on_ |
+| a3ee6f4 | - | .env.example 补 FEISHU_DEFAULT_CHAT_ID 占位 | - |
+| #18 (bb8a9e3) | P1 | 9 个 build_*_card 用错误结构（type:template），飞书 230099 content's type illegal | 全改飞书官方格式（config+elements+tag） |
+| #19 (0a2aeff) | **P0** | opencode.py 三缺陷：无 subprocess 启动 serve + 端点全假（/task /run /health /shutdown 实测 SPA fallback）+ 协议模型错（真实是 session+message） | 重写 opencode.py 方案 B（见下） |
+
+### P0 opencode 重写决策（方案 B：全局单进程 + 多 session）
+- **决策**：doc/03 §五 设计为"每 workspace 一进程"，但真实 opencode serve 一进程天然支持多 session（POST /session 指定 directory）。采用**方案 B：全局单进程 + 多 session**，简化进程管理。
+- **真实 API**（实测 opencode serve 1.17.16）：`POST /session {"directory":<绝对路径>}` 建会话 -> `POST /session/{id}/message {"parts":[{"type":"text","text":...}]}` **同步返回**结果（parts[].text + info.finish）-> `GET /session` health
+- **改动**：opencode.py 重写（subprocess 全局 serve + _ensure_session 复用 + dispatch_task 同步拿结果）+ agent_processes 加 session_id（migration 130b09d5d131）+ config 加 opencode_serve_port=18800
+- **铁律修复**（code-reviewer 发现）：_ensure_session 的 HTTP 移到 commit 后（原违反 §3#3 事务内禁止 IO/HTTP）+ dispatch_task 合并所有 text part + _wait_port 区分 ConnectError + main.py lifespan 加 shutdown_serve 进程清理 + 删除死配置 agent_port_range
+- **doc/03 §五 是只读设计文档未改**，此决策记录在此；后续若需同步 doc，主会话评估
+- 测试：539 passed（含 25+ opencode 新单测），alembic check 一致
+
+### 遗留
+- issue #20（P2，open）：build_verification_card 移除 feedback 输入框，S4A 退回流程 feedback 恒空（飞书 input 组件后续补）
+- 5 Skills 仍 SKILL.md 占位（Hermes 框架，scope 外）
+- H5 前端仅骨架（scope 外）
+
+### main 最终状态
+- 9/9 Story + 6 个端到端修复 PR 全合并
+- 539 测试绿，7 迁移（含 session_id），14 表
+- 无 open PR，仅 issue #20 open（P2 跟踪）
+
