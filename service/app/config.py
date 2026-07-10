@@ -18,8 +18,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
 
     # OpenCode 智能体执行环境
-    opencode_base_url: str = "http://localhost:8080"
-    agent_port_range: str = "10000-20000"
+    # opencode_serve_port：全局 opencode serve 子进程端口（方案 B：单进程 + 多 session）
+    opencode_serve_port: int = 18800
+    # opencode_base_url：向后兼容保留；方案 B 后由 serve_port 派生，client 用 base_url property
+    opencode_base_url: str = "http://localhost:18800"
 
     # 飞书开放平台
     feishu_app_id: str = ""

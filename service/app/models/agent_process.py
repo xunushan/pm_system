@@ -1,9 +1,10 @@
 """项目空间主 Agent 进程表 ORM。详见《数据模型文档 v2.0》2.10 表13。
 
-记录 opencode serve 进程：workspace_id UNIQUE（一个工作空间一个常驻 serve）。
-端口动态分配（10000-20000，见《系统架构文档》五）。
+方案 B（全局单进程 + 多 session）：一个全局 opencode serve 进程服务所有 workspace，
+每个 workspace 用独立 session（session_id 列），agent_processes 记录 per-workspace 的
+session_id + 状态 + 心跳。port 为全局 serve 端口（固定，非动态分配）。
 启动时机：首次下发智能体任务时（Story3 确认后），非 Story2 激活时。
-生命周期：阶段级常驻；阶段完成/3次重试不通过退出；"/pm 确认完成"后重启不同端口。
+生命周期：阶段级常驻；阶段完成/3次重试不通过退出；"/pm 确认完成"后复用 session。
 """
 
 from datetime import datetime
@@ -41,6 +42,8 @@ class AgentProcess(Base):
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     pid: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16), default="running")
+    # opencode serve session id（方案 B：全局单进程多 session，复用避免重复建会话）
+    session_id: Mapped[str | None] = mapped_column(String(64))
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.current_timestamp())
     last_heartbeat: Mapped[datetime | None] = mapped_column(DateTime)
     # 待执行任务队列（JSON 字符串）

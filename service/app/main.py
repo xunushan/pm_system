@@ -33,6 +33,10 @@ async def lifespan(app: FastAPI):
     # 关闭 Supervisor
     stop_scheduler()
     stop_dispatcher()
+    # 关闭全局 opencode serve 子进程（P1-3：避免 --reload 遗留僵尸进程）
+    from app.clients.opencode import OpenCodeClient
+
+    OpenCodeClient.shutdown_serve()
 
 
 app = FastAPI(title="目标管理系统 Service", version="0.1.0", lifespan=lifespan)
