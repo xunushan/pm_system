@@ -29,19 +29,29 @@
 - [ ] **PR-3**：Service 推卡入口补全（S2/S3/S6/S8）
 - [ ] **PR-4**：S1 draft 真实流程 + opencode serve 启动脚本
 
-### v2 测试计划（按 Story 顺序）
+### v2 测试计划（按 Story 顺序，纠正后）
 
-| Story | 卡片 | 推卡 | 点击后 | DB 断言 |
-|-------|------|------|--------|---------|
-| S1 | 总览卡 | Service push | update_card 置灰 | draft 写入+落库+删 |
-| S2 | 调度激活卡 | Service push | update_card | phase 激活+workspace |
-| S3 | 今日计划卡 | Service push | update_card | daily_records 写入 |
-| S4A | 验收卡 | opencode 产出触发 | update_card | task 完成+级联 |
-| S4B | 后置确认卡 | Service push | update_card | 后置 subtasks |
-| S5 | 日终总结卡 | Service push | update_card 实时更新 | task 状态+is_confirmed |
-| S6 | 专题完成卡 | supervisor 事件 | update_card | weekly_records |
-| S8 | 阶段衔接卡 | supervisor 事件 | update_card | phase 激活 |
-| S9 | 无卡 | board API | - | board 编辑/回退 |
+| Story | 卡片 | 推卡触发 | 点击场景 | 点击后 | DB 断言 |
+|-------|------|---------|---------|--------|---------|
+| S1 | 总览卡（draft 确认） | Service push | 确认方案 | update_card 置灰 | draft 写入+落库+删 |
+| S2 | 调度激活卡 | Service push | 确认调度 | update_card | phase 激活+workspace |
+| S3 | 今日计划卡 | Service push | 确认今日计划 | update_card | daily_records 写入 |
+| S4A | 验收卡 | opencode 产出触发 | **场景1 验收通过** + **场景2 需要修改（feedback 输入框）** | update_card | task 完成+级联 / 重试 |
+| S4B | 任务完成确认卡（带后置勾选） | Service push | 确认后置 / 不需要后置 | update_card | 后置 subtasks |
+| S5 | 日终总结卡 | Service push | 标记完成/未完成 + 确认日终总结 | update_card 实时更新 | task 状态+is_confirmed |
+| S6 | 周总结卡（周日 12:00 定时） | scheduler 定时 | 已阅 | update_card 置灰 | weekly_records+weekly.md |
+| S8 | 阶段衔接卡 | supervisor phase_completed 事件 | 确认激活/暂不激活 | update_card | phase 激活 |
+| S9 | 无卡 | board API | - | - | board 编辑/回退 |
+
+**纠正（v1 误读 doc/01）**：
+- S4B 是「任务完成确认卡」（人执行任务完成后推，卡里带后置勾选），不是"后置确认卡"。缺 builder。
+- S4A 两个场景：验收通过 + 需要修改（feedback 输入框，v1 移除了，PR-2 补回）。
+- S6 是周总结卡（周日 12:00 定时推），不是 build_theme_completed（那是 S8 衔接，theme_completed 事件）。S6 和 supervisor 仅数据参考（下周建议参考衔接状态）。缺 builder + scheduler 定时。
+
+**v2 前置改造需补的 builder**：
+- S4B `build_task_complete_card`（任务完成确认 + 后置勾选 + 确认/不需要按钮）
+- S6 `build_weekly_summary_card`（周总结，含每日回顾/阶段健康/产出/下周建议 + 已阅按钮）
+- S4A `build_verification_card` 补回 feedback input 组件（issue #20）
 
 ### v2 进度
 
