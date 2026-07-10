@@ -160,40 +160,34 @@ class FeishuClient:
 
 
 def build_verification_card(task_id: str, task_name: str, file_paths: list[str]) -> dict:
-    """构建验收卡片（模板填充，无 LLM，doc/06 步骤6）。
+    """构建验收卡片（飞书官方卡片格式 config+elements+tag，无 LLM，doc/06 步骤6）。
 
     卡片内容：任务名 + 产出文件名列表 + 验收通过/需要修改按钮。
-    回调 action_id：story4A_验收通过 / story4A_需要修改（带 feedback 输入框）。
+    回调 action_id：story4A_验收通过 / story4A_需要修改。
+    注：原 feedback 输入框简化为独立"需要修改"按钮（飞书 input 组件语法不同，后续再做）。
     """
     file_list = "\n".join(f"· {fp}" for fp in file_paths) or "（无产出文件）"
     content = f"📋 **任务完成确认**\n\n任务：{task_name}\n\n产出文件：\n{file_list}"
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "验收通过"},
+                        "value": {"action_id": "story4A_验收通过", "task_id": task_id},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "需要修改"},
+                        "value": {"action_id": "story4A_需要修改", "task_id": task_id},
+                    },
+                ],
             },
-            "actions": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "content": "验收通过"},
-                    "value": {"action_id": "story4A_验收通过", "task_id": task_id},
-                },
-                {
-                    "type": "input",
-                    "placeholder": {"type": "plain_text", "content": "输入修改意见"},
-                    "name": "feedback",
-                    "actions": [
-                        {
-                            "type": "button",
-                            "text": {"type": "plain_text", "content": "需要修改"},
-                            "value": {"action_id": "story4A_需要修改", "task_id": task_id},
-                        }
-                    ],
-                },
-            ],
-        },
+        ],
     }
 
 
@@ -204,7 +198,7 @@ def build_daily_summary_card(
     incomplete_tasks: list[dict],
     phase_health: list[dict],
 ) -> dict:
-    """构建日终总结卡片（模板填充，无 LLM，doc/06 步骤4）。
+    """构建日终总结卡片（飞书官方卡片格式 config+elements+tag，无 LLM，doc/06 步骤4）。
 
     卡片内容：今日任务列表（每项带状态切换按钮）+ 步骤进展 + 确认日终总结按钮。
     异议双向按钮（doc/01 S5 + D18）：
@@ -234,8 +228,8 @@ def build_daily_summary_card(
     for t in completed_tasks:
         actions.append(
             {
-                "type": "button",
-                "text": {"type": "plain_text", "content": f"标记未完成：{t['name']}"},
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"标记未完成：{t['name']}"},
                 "value": {
                     "action_id": "story5_标记未完成",
                     "task_id": t["task_id"],
@@ -247,8 +241,8 @@ def build_daily_summary_card(
     for t in incomplete_tasks:
         actions.append(
             {
-                "type": "button",
-                "text": {"type": "plain_text", "content": f"标记完成：{t['name']}"},
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"标记完成：{t['name']}"},
                 "value": {
                     "action_id": "story5_标记完成",
                     "task_id": t["task_id"],
@@ -260,8 +254,8 @@ def build_daily_summary_card(
     # 确认日终总结按钮
     actions.append(
         {
-            "type": "button",
-            "text": {"type": "plain_text", "content": "确认日终总结"},
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "确认日终总结"},
             "value": {
                 "action_id": "story5_确认日终总结",
                 "daily_id": daily_id,
@@ -271,14 +265,11 @@ def build_daily_summary_card(
     )
 
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
-            },
-            "actions": actions,
-        },
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {"tag": "action", "actions": actions},
+        ],
     }
 
 
@@ -289,7 +280,7 @@ def build_phase_linking_card(
     suggested_deadline: str,
     user_id: str = "",
 ) -> dict:
-    """构建阶段衔接卡片（doc/03 §3.3 Step3，模板填充，无 LLM）。
+    """构建阶段衔接卡片（飞书官方卡片格式 config+elements+tag，doc/03 §3.3 Step3，无 LLM）。
 
     卡片内容：阶段X已完成 -> 下一阶段Y，deadline date_picker。
     按钮：确认激活 / 暂不激活。
@@ -302,34 +293,34 @@ def build_phase_linking_card(
         f"请确认是否激活下一阶段。"
     )
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "确认激活"},
+                        "value": {
+                            "action_id": "story8_确认激活",
+                            "phase_id": next_phase_id,
+                            "deadline": suggested_deadline,
+                            "user_id": user_id,
+                        },
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "暂不激活"},
+                        "value": {
+                            "action_id": "story8_暂不激活",
+                            "phase_id": next_phase_id,
+                            "user_id": user_id,
+                        },
+                    },
+                ],
             },
-            "actions": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "content": "确认激活"},
-                    "value": {
-                        "action_id": "story8_确认激活",
-                        "phase_id": next_phase_id,
-                        "deadline": suggested_deadline,
-                        "user_id": user_id,
-                    },
-                },
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "content": "暂不激活"},
-                    "value": {
-                        "action_id": "story8_暂不激活",
-                        "phase_id": next_phase_id,
-                        "user_id": user_id,
-                    },
-                },
-            ],
-        },
+        ],
     }
 
 
@@ -338,7 +329,7 @@ def build_theme_completed_card(
     other_themes: list[dict],
     user_id: str = "",
 ) -> dict:
-    """构建专题完成卡片（doc/03 §3.2，模板填充，无 LLM）。
+    """构建专题完成卡片（飞书官方卡片格式 config+elements+tag，doc/03 §3.2，无 LLM）。
 
     卡片内容：专题X已完成 -> 列出同 goal 下未完成的其他专题（单选，专题无序）。
     用户选后跳 Story2 激活（patch 填 deadline）。
@@ -352,8 +343,8 @@ def build_theme_completed_card(
     for t in other_themes:
         actions.append(
             {
-                "type": "button",
-                "text": {"type": "plain_text", "content": f"激活：{t['name']}"},
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": f"激活：{t['name']}"},
                 "value": {
                     "action_id": "story8_去激活",
                     "theme_id": t["theme_id"],
@@ -361,29 +352,23 @@ def build_theme_completed_card(
                 },
             }
         )
+    elements: list[dict] = [{"tag": "markdown", "content": content}]
+    if actions:
+        elements.append({"tag": "action", "actions": actions})
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
-            },
-            "actions": actions,
-        },
+        "config": {"wide_screen_mode": True},
+        "elements": elements,
     }
 
 
 def build_goal_completed_card(goal_name: str) -> dict:
-    """构建目标完成通知卡片（纯通知，无按钮）。"""
+    """构建目标完成通知卡片（飞书官方卡片格式 config+elements+tag，纯通知，无按钮）。"""
     content = f"🎯 **目标「{goal_name}」已全部完成！**\n\n恭喜达成目标。"
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
-            },
-        },
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+        ],
     }
 
 
@@ -393,7 +378,7 @@ def build_start_date_reminder_card(
     scheduled_start_date: str,
     user_id: str = "",
 ) -> dict:
-    """构建 scheduled_start_date 到了未激活提醒卡片（doc/06 §I Step4）。"""
+    """构建 scheduled_start_date 到了未激活提醒卡片（飞书官方卡片格式，doc/06 §I Step4）。"""
     content = (
         f"⏰ **计划开始日提醒**\n\n"
         f"目标：**{goal_name}**\n"
@@ -401,24 +386,24 @@ def build_start_date_reminder_card(
         f"你计划今天开始，要激活吗？"
     )
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "去激活"},
+                        "value": {
+                            "action_id": "story8_去激活",
+                            "goal_id": goal_id,
+                            "user_id": user_id,
+                        },
+                    }
+                ],
             },
-            "actions": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "content": "去激活"},
-                    "value": {
-                        "action_id": "story8_去激活",
-                        "goal_id": goal_id,
-                        "user_id": user_id,
-                    },
-                }
-            ],
-        },
+        ],
     }
 
 
@@ -429,7 +414,7 @@ def build_deadline_reminder_card(
     h5_base_url: str = "",
     user_id: str = "",
 ) -> dict:
-    """构建 deadline 临近提醒卡片（doc/06 §I Step5）。"""
+    """构建 deadline 临近提醒卡片（飞书官方卡片格式 config+elements+tag，doc/06 §I Step5）。"""
     content = (
         f"📅 **deadline 临近**\n\n"
         f"阶段：**{phase_name}**\n"
@@ -437,52 +422,46 @@ def build_deadline_reminder_card(
         f"请注意进度，及时调整。"
     )
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "去页面调整"},
+                        "value": {
+                            "action_id": "story8_去页面调整",
+                            "phase_id": phase_id,
+                            "user_id": user_id,
+                        },
+                    }
+                ],
             },
-            "actions": [
-                {
-                    "type": "button",
-                    "text": {"type": "plain_text", "content": "去页面调整"},
-                    "value": {
-                        "action_id": "story8_去页面调整",
-                        "phase_id": phase_id,
-                        "user_id": user_id,
-                    },
-                }
-            ],
-        },
+        ],
     }
 
 
 def build_plan_reminder_card(date_str: str) -> dict:
-    """构建未确认计划提醒卡片（doc/06 §I Step6，10:00 巡检）。"""
+    """构建未确认计划提醒卡片（飞书官方格式，doc/06 §I Step6，10:00 巡检）。"""
     content = f"📋 **今日计划未确认**\n\n日期：{date_str}\n\n请尽快确认今日计划。"
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
-            },
-        },
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+        ],
     }
 
 
 def build_summary_reminder_card(date_str: str) -> dict:
-    """构建未做日终总结提醒卡片（doc/06 §I Step7，21:00 巡检）。"""
+    """构建未做日终总结提醒卡片（飞书官方格式，doc/06 §I Step7，21:00 巡检）。"""
     content = f"📝 **今日日终总结未完成**\n\n日期：{date_str}\n\n请尽快完成日终总结。"
     return {
-        "type": "template",
-        "data": {
-            "template": {
-                "type": "column_set",
-                "columns": [{"elements": [{"type": "markdown", "content": content}]}],
-            },
-        },
+        "config": {"wide_screen_mode": True},
+        "elements": [
+            {"tag": "markdown", "content": content},
+        ],
     }
 
 
