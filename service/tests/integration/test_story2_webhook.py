@@ -64,3 +64,22 @@ def test_webhook_unknown_action_returns_noop(client):
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     assert resp.json()["code"] == 0
+
+
+def test_webhook_url_verification_echoes_challenge(client):
+    """飞书验签：type=url_verification 时原样回 challenge（无 action 字段）。
+
+    飞书配置回调地址时先发此请求确认地址归属，必须返回 {"challenge": "<原值>"}，
+    否则飞书报"Challenge code 没有返回"导致回调地址校验失败。
+    """
+    challenge = "6005fab3-9bac-47ed-b9c6-95589e38c7ef"
+    payload = {
+        "challenge": challenge,
+        "token": "P52zxkv6uVXTwPz3nUvW6f8FAKGW3SUG",
+        "type": "url_verification",
+    }
+    resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {"challenge": challenge}
+

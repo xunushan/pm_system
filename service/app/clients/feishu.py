@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 _FEISHU_API = "https://open.feishu.cn/open-apis"
 
 
+def _receive_id_type(receive_id: str) -> str:
+    """根据 receive_id 前缀推断飞书 receive_id_type（飞书 API 要求与 id 匹配）。
+
+    - ou_ -> open_id（个人）
+    - oc_ -> chat_id（群）
+    - on_ -> union_id
+    其余默认 chat_id（兼容历史调用方传群 chat_id 的情形）。
+    """
+    if receive_id.startswith("ou_"):
+        return "open_id"
+    if receive_id.startswith("on_"):
+        return "union_id"
+    return "chat_id"
+
+
 class FeishuClient:
     """飞书 API 客户端：发送消息 / 卡片 / 文件。
 
@@ -64,7 +79,7 @@ class FeishuClient:
         resp = httpx.post(
             f"{_FEISHU_API}/im/v1/messages",
             headers=self._headers(),
-            params={"receive_id_type": "chat_id"},
+            params={"receive_id_type": _receive_id_type(chat_id)},
             json={
                 "receive_id": chat_id,
                 "msg_type": "interactive",
@@ -95,7 +110,7 @@ class FeishuClient:
         resp = httpx.post(
             f"{_FEISHU_API}/im/v1/messages",
             headers=self._headers(),
-            params={"receive_id_type": "chat_id"},
+            params={"receive_id_type": _receive_id_type(chat_id)},
             json={
                 "receive_id": chat_id,
                 "msg_type": "text",
@@ -132,7 +147,7 @@ class FeishuClient:
         resp = httpx.post(
             f"{_FEISHU_API}/im/v1/messages",
             headers=self._headers(),
-            params={"receive_id_type": "chat_id"},
+            params={"receive_id_type": _receive_id_type(chat_id)},
             json={
                 "receive_id": chat_id,
                 "msg_type": "file",

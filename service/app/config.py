@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     # 飞书开放平台
     feishu_app_id: str = ""
     feishu_app_secret: str = ""
+    # 飞书默认推送目标（单用户场景：个人 open_id 或群 chat_id；推卡 send_card 的 receive_id）
+    feishu_default_chat_id: str = ""
 
     # H5 页面基址（pm 配置类指令生成预填链接用）
     h5_base_url: str = "http://localhost:5173"

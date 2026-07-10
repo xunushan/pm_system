@@ -49,8 +49,17 @@ async def feishu_card_callback(
     background_tasks: BackgroundTasks,
     db: DBSession,
 ) -> dict:
-    """飞书卡片按钮回调。解析 action.value.action_id -> 路由到对应 AppService。"""
+    """飞书卡片按钮回调。解析 action.value.action_id -> 路由到对应 AppService。
+
+    飞书配置回调地址时会先发 url_verification 验签请求，要求原样返回 challenge
+    （飞书据此确认地址归属）。此请求无 action 字段，须在 action 路由前优先处理。
+    """
     payload = await request.json()
+
+    # 飞书验签：type=url_verification 时原样回 challenge（飞书回调验签约定）
+    if payload.get("type") == "url_verification":
+        return {"challenge": payload.get("challenge", "")}
+
     action_value = (payload.get("action") or {}).get("value", {})
     action_id = action_value.get("action_id")
 
