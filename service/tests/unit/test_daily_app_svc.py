@@ -435,3 +435,104 @@ def test_trigger_async_calls_opencode_stubs(db_session, monkeypatch):
     assert len(calls) == 1
     assert len(calls[0]) == 1
     assert calls[0][0]["name"] == "前置1"
+
+
+def test_trigger_async_dispatches_agent_main_task(db_session, monkeypatch):
+    """FIX-2: trigger_async 对 agent-type 任务调 start_agent_serve 且传 task 参数。
+
+    回归：原实现只 `start_agent_serve(ws.id)` 不传 task，导致 start_agent_serve 内
+    `if task:` 不满足，首个智能体主任务不被 dispatch。
+    """
+    from uuid import uuid4
+
+    from sqlalchemy.orm import sessionmaker
+
+    from app.models.workspace import Workspace
+    from app.services import daily_app_svc
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=2)
+    themes[0].type = "dev"  # agent type
+    _activate_phase(phases[0])
+    # trigger_async 查 Workspace join Theme，需建 workspace 才能查到 agent 任务
+    ws = Workspace(
+        id=str(uuid4()),
+        theme_id=themes[0].id,
+        path=f"data/workspaces/{uuid4().hex[:8]}",
+        managed=True,
+        status="已就绪",
+        type="dev",
+    )
+    db_session.add(ws)
+    db_session.flush()
+
+    from app.models.task import Task
+
+    tasks = db_session.query(Task).filter_by(phase_id=phases[0].id).all()
+    db_session.flush()
+
+    data = _confirm(db_session, [tasks[0].id, tasks[1].id])
+    db_session.flush()
+
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    serve_calls: list[tuple] = []
+
+    def _capture_serve(workspace_id, task=None):
+        serve_calls.append((workspace_id, task))
+
+    with (
+        patch.object(daily_app_svc.OpenCodeClient, "start_agent_serve", side_effect=_capture_serve),
+        patch.object(daily_app_svc.OpenCodeClient, "dispatch_pre_subtasks"),
+    ):
+        DailyAppSvc.trigger_async(data.daily_id)
+
+    # 2 个 agent 任务 -> start_agent_serve 调 2 次，每次带 task dict
+    assert len(serve_calls) == 2
+    for ws_id, task in serve_calls:
+        assert ws_id == ws.id  # 同一 workspace（幂等复用）
+        assert task is not None
+        assert "task_id" in task
+        assert "name" in task
+        assert "phase_id" in task
+        assert task["phase_id"] == phases[0].id
+    # task_id 对应 daily 计划中的 agent 任务
+    dispatched_task_ids = {c[1]["task_id"] for c in serve_calls}
+    assert dispatched_task_ids == {tasks[0].id, tasks[1].id}
+    # name 取自 task.name
+    dispatched_names = {c[1]["name"] for c in serve_calls}
+    assert dispatched_names == {tasks[0].name, tasks[1].name}
+
+
+def test_trigger_async_no_agent_task_no_serve(db_session, monkeypatch):
+    """FIX-2 回归：learning-type 任务（非 agent）不调 start_agent_serve。"""
+    from sqlalchemy.orm import sessionmaker
+
+    from app.services import daily_app_svc
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    _activate_phase(phases[0])
+    from app.models.task import Task
+
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    db_session.flush()
+
+    data = _confirm(db_session, [task.id])
+    db_session.flush()
+
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+
+    with (
+        patch.object(daily_app_svc.OpenCodeClient, "start_agent_serve") as mock_serve,
+        patch.object(daily_app_svc.OpenCodeClient, "dispatch_pre_subtasks"),
+    ):
+        DailyAppSvc.trigger_async(data.daily_id)
+
+    mock_serve.assert_not_called()

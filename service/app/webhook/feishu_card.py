@@ -129,7 +129,14 @@ async def feishu_card_callback(
 
     if action_id in ("story5_标记完成", "story5_标记未完成"):
         task_id = action_value.get("task_id")
-        message_id = action_value.get("message_id", "")
+        # message_id 双保险取法（铁律 §3#11）：优先从飞书回调 payload 顶层取被点击卡片的
+        # 消息标识（open_message_id / message_id），fallback 从 action_value 取。
+        # 飞书卡片回调 payload 顶层字段名未经实测确认，故双候选 + fallback 兜底。
+        message_id = (
+            payload.get("open_message_id")
+            or payload.get("message_id")
+            or action_value.get("message_id", "")
+        )
         daily_id = action_value.get("daily_id", "")
         if not task_id:
             return {"code": 1002, "message": "回调缺少 task_id", "data": None}
