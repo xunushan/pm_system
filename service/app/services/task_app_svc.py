@@ -66,6 +66,7 @@ from app.schemas.task import (
     TimeoutAlertData,
 )
 from app.services.daily_app_svc import DailyAppSvc
+from app.supervisor.constants import DEFAULT_CHAT_ID
 from app.supervisor.event_bus import emit
 
 logger = logging.getLogger(__name__)
@@ -590,7 +591,7 @@ class TaskAppSvc:
                     svc.opencode.shutdown(workspace_id)
                 try:
                     svc.feishu.send_text(
-                        "chat_id_placeholder",
+                        DEFAULT_CHAT_ID,
                         f"⚠️ 智能体任务多次验收不通过\n"
                         f"任务：{task.name}\n"
                         f"工作空间路径：{workspace_path}\n"
@@ -647,7 +648,7 @@ class TaskAppSvc:
         # 飞书通知（事务外 IO）
         try:
             self.feishu.send_text(
-                "chat_id_placeholder",
+                DEFAULT_CHAT_ID,
                 f"⚠️ 智能体执行超时\n任务 ID: {task_id}\n工作空间: {workspace_id}\n"
                 "已过 2 小时未收到回调，请检查。",
             )
@@ -825,14 +826,14 @@ class TaskAppSvc:
         # 发验收卡片
         try:
             card = build_verification_card(task_id, task_name, file_paths)
-            self.feishu.send_card("chat_id_placeholder", card)
+            self.feishu.send_card(DEFAULT_CHAT_ID, card)
         except Exception:
             logger.exception("发送验收卡片失败: task=%s", task_id)
 
         # 逐个发送产出文件
         for fp in file_paths:
             try:
-                self.feishu.send_file("chat_id_placeholder", fp)
+                self.feishu.send_file(DEFAULT_CHAT_ID, fp)
             except Exception:
                 logger.exception("发送产出文件失败: %s", fp)
 
