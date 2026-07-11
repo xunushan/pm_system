@@ -37,7 +37,7 @@
 5. **DB 唯一真相源**。H5 页面调 Service API 落库，无反向同步（无多维表格）。
 6. **drafts 规避飞书回调 30KB**。pm-plan 规划数据存 drafts（content 存完整 JSON），确认按钮回调只传 draft_id。
 7. **状态机约束**（doc/02 2.16）。回退/暂停必填 reason；恢复不填 reason。所有流转写 `status_change_log`。
-8. **executor 规划态不填**。任务规划时 executor=NULL，pm-daily 按专题 type 推断填入（learning/research/source→human；dev/survey→agent）。
+8. **executor 规划态不填**。任务规划时 executor=NULL，pm-daily 按专题 type 推断填入（learning/research/source->human；dev/survey->agent）。用户可在 H5 页面改；S4A 确认完成推卡时也可改 executor=agent 重新下发（D26）。
 9. **前置整体 / 后置脱钩**。前置按今日整体生成（与任务解耦，任务勾选变化**不**重生成前置）；后置按单个任务生成且和完成脱钩（完成即时级联，后置可全取消）。
 10. **专题无序 + 阶段强约束**。专题无 sort_order；阶段按 sort_order 顺序激活，自动锁定第 1 个未开始阶段。
 11. **卡片全生命周期归 Service**（doc/07 D25）。Service 拥有构建（build_*_card）+ 发送（send_card/update_card/send_file）+ 回调路由（/webhook action_id）+ 点击后刷新（update_card 重建整张卡）；Skill 只调 Service 推卡方法。开发期 Skill 缺位时，"Skill 推卡"场景必须有等价 Service 推卡方法兜底。所有回调点击后必须 update_card（按钮灰化/反转/消失，禁止"点击后卡片不变"）；message_id 优先从飞书回调 payload 顶层取（飞书卡片回调含被点击卡片的 message_id），fallback 从 action_value 取（待 e2e TC-S5-01 实测确认取法）。按钮置于对应项旁（per-item），禁止全挤一个 action 块。
@@ -182,7 +182,7 @@ echo "=== 开放 issue ===" && gh issue list
 | 状态机校验 | `app/core/state_machine.py` | 状态流转合法性 + reason 必填 | S5、S9 |
 | 状态变更审计 | `app/core/audit.py` | 写 status_change_log | S5、S8、S9 |
 | 飞书客户端 | `app/clients/feishu.py` | 发消息/更新卡片/发文件 | 所有推卡片的 Story |
-| OpenCode 客户端 | `app/clients/opencode.py` | 下发任务到 opencode serve | S4A |
+| OpenCode 客户端 | `app/clients/opencode.py` | 下发任务到 opencode serve（方案 B：全局单进程 + 多 session，不同 workspace 用不同 session_id；3 次不通过调 DELETE /session/:id 退 session，全局 serve 保留）| S4A |
 | Obsidian 读写 | `app/clients/fileio.py` | daily.md/weekly.md 快照 | S5、S6 |
 | 事件总线 | `app/supervisor/event_bus.py` | 状态变更事件分发 | S8 实现，S1-S7 调 emit() |
 
