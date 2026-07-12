@@ -525,6 +525,186 @@ def test_shutdown_no_http_call(db_session):
     mock_post.assert_not_called()
 
 
+# ---- delete_session（D26：3 次不通过退 session，全局 serve 保留）----
+
+
+def test_delete_session_calls_delete_api(db_session):
+    """delete_session 调 DELETE /session/{id} 退 session（D26 方案 B）。"""
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_to_delete",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("app.clients.opencode.httpx.delete", return_value=mock_resp) as mock_delete:
+        client = OpenCodeClient(db_session)
+        result = client.delete_session(ws.id)
+
+    assert result is True
+    mock_delete.assert_called_once()
+    call = mock_delete.call_args
+    assert "/session/ses_to_delete" in call.args[0]
+
+
+def test_delete_session_clears_session_id_and_status(db_session):
+    """delete_session 后 agent_processes.session_id=None, status=stopped。"""
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_x",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("app.clients.opencode.httpx.delete", return_value=mock_resp):
+        client = OpenCodeClient(db_session)
+        client.delete_session(ws.id)
+
+    db_session.refresh(ap)
+    assert ap.session_id is None
+    assert ap.status == "stopped"
+
+
+def test_delete_session_preserves_global_serve(db_session):
+    """方案 B（D26）：退 session 不 terminate 全局 serve 进程。"""
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_y",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None  # 运行中
+    OpenCodeClient._proc = mock_proc
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("app.clients.opencode.httpx.delete", return_value=mock_resp):
+        client = OpenCodeClient(db_session)
+        client.delete_session(ws.id)
+
+    # 全局 serve 进程未被 terminate，_proc 保留
+    mock_proc.terminate.assert_not_called()
+    assert OpenCodeClient._proc is mock_proc
+
+
+def test_delete_session_returns_false_when_no_record(db_session):
+    """无 agent_process 记录 -> False，不发 HTTP。"""
+    ws, _ = _setup_workspace(db_session)
+
+    with patch("app.clients.opencode.httpx.delete") as mock_delete:
+        client = OpenCodeClient(db_session)
+        result = client.delete_session(ws.id)
+
+    assert result is False
+    mock_delete.assert_not_called()
+
+
+def test_delete_session_returns_false_when_session_id_none(db_session):
+    """agent_process 存在但 session_id=None -> False，不发 HTTP。"""
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id=None,
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    with patch("app.clients.opencode.httpx.delete") as mock_delete:
+        client = OpenCodeClient(db_session)
+        result = client.delete_session(ws.id)
+
+    assert result is False
+    mock_delete.assert_not_called()
+
+
+def test_delete_session_http_failure_returns_false(db_session):
+    """HTTP DELETE 失败 -> 返回 False，不抛（失败非阻塞）。
+
+    P1 修复（DB 先清）：HTTP 失败时 DB session_id 已 None、status=stopped（事务1
+    在 HTTP 之前 commit）。下次 _ensure_session 必走重建路径，不复用旧 session_id
+    导致 404 阻断。opencode session 变孤儿（serve 退出自然清理，可接受）。
+    """
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_fail",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    with patch("app.clients.opencode.httpx.delete", side_effect=httpx.ConnectError("refused")):
+        client = OpenCodeClient(db_session)
+        result = client.delete_session(ws.id)
+
+    assert result is False
+    # DB 已在事务1清完（HTTP 前 commit），无论 HTTP 成败 DB 均 None
+    db_session.refresh(ap)
+    assert ap.session_id is None
+    assert ap.status == "stopped"
+
+
+def test_delete_session_db_cleared_before_http(db_session):
+    """P1 修复验证：DB session_id 在 HTTP DELETE 调用前已清为 None。
+
+    顺序：事务1 commit（session_id=None + stopped）-> 事务外 HTTP DELETE。
+    验证：HTTP 被调用时，DB session_id 应为 None（已 commit，无 404 阻断风险）。
+    """
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_order",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    http_call_db_state = []
+
+    def _track_http(*args, **kwargs):
+        # HTTP 被调用时查 DB：session_id 应已 None（事务1 已 commit）
+        db_session.refresh(ap)
+        http_call_db_state.append(ap.session_id)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    with patch("app.clients.opencode.httpx.delete", side_effect=_track_http):
+        client = OpenCodeClient(db_session)
+        client.delete_session(ws.id)
+
+    # HTTP 调用时 DB session_id 应为 None（事务1 已 commit 清理）
+    assert http_call_db_state == [None]
+
+
 # ---- shutdown_serve（P1-3：全局进程清理）----
 
 
