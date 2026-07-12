@@ -61,7 +61,13 @@ def _setup_week(db, *, tasks_per_phase=2, completed_count=1):
 
 
 def _card_value(action_id, **kwargs):
-    return {"action": {"value": {"action_id": action_id, **kwargs}}}
+    """构造 schema 2.0 卡片回调 payload（doc/09 V2：event.action.value）。"""
+    return {
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {"value": {"action_id": action_id, **kwargs}},
+        }
+    }
 
 
 # ===== GET /weekly/summary/generate =====

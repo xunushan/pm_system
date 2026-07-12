@@ -357,8 +357,14 @@ def test_stats_daily_returns_data(client, db_session):
 # ===== webhook story5_三动作 =====
 
 
-def _card_value(action_id, **kwargs):
-    return {"action": {"value": {"action_id": action_id, **kwargs}}}
+def _card_value(action_id, message_id="om_test", **kwargs):
+    """构造 schema 2.0 卡片回调 payload（doc/09 V2）。"""
+    return {
+        "event": {
+            "context": {"open_message_id": message_id},
+            "action": {"value": {"action_id": action_id, **kwargs}},
+        }
+    }
 
 
 def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
@@ -433,12 +439,12 @@ def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
     assert mock_update.call_args[0][0] == "msg_001"
 
 
-def test_webhook_story5_message_id_from_payload_top(client, db_session, monkeypatch):
-    """FIX-1: message_id 优先从 payload 顶层取（飞书回调含被点击卡片的 open_message_id）。
+def test_webhook_story5_message_id_from_event_context(client, db_session, monkeypatch):
+    """doc/09 V2: message_id 从 event.context.open_message_id 取（修正 FIX-1 错误取顶层）。
 
-    飞书卡片按钮点击回调，payload 顶层含被点击卡片的消息标识。action.value 里
-    不含 message_id（build_daily_summary_card 构造的按钮 value 无此字段），必须从
-    payload 顶层取，否则恒空串导致 update_card 指向无效 URL、卡片刷新坏掉。
+    schema 2.0 回调结构：message_id 在 payload["event"]["context"]["open_message_id"]，
+    不在 payload 顶层（FIX-1 旧取法错误）。handler 从 event.context 取后传给
+    update_card，刷新被点击的卡片。
     """
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=0
@@ -452,23 +458,26 @@ def test_webhook_story5_message_id_from_payload_top(client, db_session, monkeypa
     with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
         payload = _card_value(
             "story5_标记完成",
+            message_id="om_event_ctx",
             task_id=tasks[0].id,
             daily_id=daily.id,
         )
-        # message_id 放 payload 顶层（飞书回调实际结构），action.value 里不带
-        payload["open_message_id"] = "om_top_level_msg"
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["code"] == 0
 
-    # update_card 被调用且 message_id 来自 payload 顶层 open_message_id
+    # update_card 被调用且 message_id 来自 event.context.open_message_id
     mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == "om_top_level_msg"
+    assert mock_update.call_args[0][0] == "om_event_ctx"
 
 
-def test_webhook_story5_message_id_from_payload_message_id_field(client, db_session, monkeypatch):
-    """FIX-1: payload 顶层 open_message_id 缺失时，取 payload 顶层 message_id。"""
+def test_webhook_story5_message_id_missing_context(client, db_session, monkeypatch):
+    """doc/09 V2: event.context.open_message_id 缺失时 message_id 为空串（容错）。
+
+    schema 2.0 回调结构只有一个 message_id 路径（event.context.open_message_id）。
+    若 context 无此字段，handler 传空串给 update_card（不崩，但刷新无效）。
+    """
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=0
     )
@@ -479,18 +488,23 @@ def test_webhook_story5_message_id_from_payload_message_id_field(client, db_sess
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
     with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
-        payload = _card_value(
-            "story5_标记完成",
-            task_id=tasks[0].id,
-            daily_id=daily.id,
-        )
-        # 顶层用 message_id 字段（非 open_message_id）
-        payload["message_id"] = "top_msg_id"
+        payload = {
+            "event": {
+                "context": {},  # 无 open_message_id
+                "action": {
+                    "value": {
+                        "action_id": "story5_标记完成",
+                        "task_id": tasks[0].id,
+                        "daily_id": daily.id,
+                    }
+                },
+            }
+        }
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
     mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == "top_msg_id"
+    assert mock_update.call_args[0][0] == ""
 
 
 def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):

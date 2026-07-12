@@ -164,13 +164,16 @@ def test_webhook_story8_confirm_activate(client, db_session):
     db_session.flush()
 
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story8_确认激活",
-                "phase_id": phases[1].id,
-                "deadline": "2026-07-25",
-                "user_id": "u1",
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story8_确认激活",
+                    "phase_id": phases[1].id,
+                    "deadline": "2026-07-25",
+                    "user_id": "u1",
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)
@@ -188,12 +191,15 @@ def test_webhook_story8_skip_activate(client, db_session):
     db_session.flush()
 
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story8_暂不激活",
-                "phase_id": phases[1].id,
-                "user_id": "u1",
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story8_暂不激活",
+                    "phase_id": phases[1].id,
+                    "user_id": "u1",
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)
@@ -207,13 +213,16 @@ def test_webhook_story8_skip_activate(client, db_session):
 def test_webhook_story8_go_activate(client, db_session):
     """story8_去激活 -> 返回链接（跳转，非事务）。"""
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story8_去激活",
-                "goal_id": "g1",
-                "theme_id": "t1",
-                "user_id": "u1",
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story8_去激活",
+                    "goal_id": "g1",
+                    "theme_id": "t1",
+                    "user_id": "u1",
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)
@@ -226,12 +235,15 @@ def test_webhook_story8_go_activate(client, db_session):
 def test_webhook_story8_go_page(client, db_session):
     """story8_去页面调整 -> 返回 H5 链接。"""
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story8_去页面调整",
-                "phase_id": "p1",
-                "user_id": "u1",
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story8_去页面调整",
+                    "phase_id": "p1",
+                    "user_id": "u1",
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)

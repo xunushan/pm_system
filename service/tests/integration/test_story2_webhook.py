@@ -11,14 +11,18 @@ _WEBHOOK = "/webhook/feishu/card"
 
 
 def _card_value(goal_id, items):
+    """构造 schema 2.0 卡片回调 payload（doc/09 V2：event.action.value）。"""
     return {
-        "action": {
-            "value": {
-                "action_id": "schedule.confirm",
-                "user_id": "u1",
-                "goal_id": goal_id,
-                "items": items,
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "schedule.confirm",
+                    "user_id": "u1",
+                    "goal_id": goal_id,
+                    "items": items,
+                }
+            },
         }
     }
 
@@ -60,7 +64,7 @@ def test_webhook_schedule_confirm_quota_409(client, db_session):
 
 def test_webhook_unknown_action_returns_noop(client):
     """未知 action_id -> noop。"""
-    payload = {"action": {"value": {"action_id": "unknown.x"}}}
+    payload = {"event": {"context": {}, "action": {"value": {"action_id": "unknown.x"}}}}
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     assert resp.json()["code"] == 0
