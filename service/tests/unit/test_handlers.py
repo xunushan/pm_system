@@ -26,13 +26,38 @@ class FakeFeishu:
 
 
 def _extract_action_ids(card):
-    """从卡片提取所有 action_id（飞书官方格式：elements 里的 action block）。"""
+    """从卡片提取所有 action_id（schema 2.0：body.elements 里的 button behaviors callback）。"""
     action_ids = []
-    for el in card.get("elements", []):
-        if el.get("tag") == "action":
-            for btn in el.get("actions", []):
-                action_ids.append(btn.get("value", {}).get("action_id"))
+    elements = card.get("body", {}).get("elements", card.get("elements", []))
+    for el in elements:
+        if el.get("tag") == "button" and "behaviors" in el:
+            for behavior in el["behaviors"]:
+                if behavior.get("type") == "callback":
+                    action_ids.append(behavior.get("value", {}).get("action_id"))
     return action_ids
+
+
+def _extract_form_submit_names(card):
+    """从卡片提取所有 form_submit 按钮的 name（schema 2.0 form 内提交按钮）。
+
+    递归搜索 form.elements 内的 button（含 column_set 嵌套，doc/09 §S8）。
+    """
+    names = []
+    elements = card.get("body", {}).get("elements", card.get("elements", []))
+    for el in elements:
+        if el.get("tag") == "form":
+            _collect_submit_names(el.get("elements", []), names)
+    return names
+
+
+def _collect_submit_names(elements: list, names: list):
+    """递归收集 form_submit 按钮的 name（处理 column_set 嵌套）。"""
+    for el in elements:
+        if el.get("tag") == "button" and el.get("action_type") == "form_submit":
+            names.append(el.get("name"))
+        elif el.get("tag") == "column_set":
+            for col in el.get("columns", []):
+                _collect_submit_names(col.get("elements", []), names)
 
 
 def test_on_phase_completed_pushes_linking_card(db_session, fake_redis):
@@ -46,9 +71,10 @@ def test_on_phase_completed_pushes_linking_card(db_session, fake_redis):
 
     assert len(feishu.cards) == 1
     card = feishu.cards[0]["card"]
-    action_ids = _extract_action_ids(card)
-    assert "story8_确认激活" in action_ids
-    assert "story8_暂不激活" in action_ids
+    # schema 2.0: form_submit 按钮靠 name 区分（doc/09 §S8）
+    submit_names = _extract_form_submit_names(card)
+    assert "btn_activate" in submit_names
+    assert "btn_defer" in submit_names
 
 
 def test_on_phase_completed_records_redis(db_session, fake_redis):
