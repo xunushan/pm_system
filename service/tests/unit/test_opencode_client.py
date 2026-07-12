@@ -644,7 +644,9 @@ def test_delete_session_returns_false_when_session_id_none(db_session):
 def test_delete_session_http_failure_returns_false(db_session):
     """HTTP DELETE 失败 -> 返回 False，不抛（失败非阻塞）。
 
-    DB 侧 session_id 保留不变（事务2 未执行，下次可重试）。
+    P1 修复（DB 先清）：HTTP 失败时 DB session_id 已 None、status=stopped（事务1
+    在 HTTP 之前 commit）。下次 _ensure_session 必走重建路径，不复用旧 session_id
+    导致 404 阻断。opencode session 变孤儿（serve 退出自然清理，可接受）。
     """
     ws, _ = _setup_workspace(db_session)
     ap = AgentProcess(
@@ -662,10 +664,45 @@ def test_delete_session_http_failure_returns_false(db_session):
         result = client.delete_session(ws.id)
 
     assert result is False
-    # HTTP 失败，事务2 未执行，DB 不变
+    # DB 已在事务1清完（HTTP 前 commit），无论 HTTP 成败 DB 均 None
     db_session.refresh(ap)
-    assert ap.session_id == "ses_fail"
-    assert ap.status == "running"
+    assert ap.session_id is None
+    assert ap.status == "stopped"
+
+
+def test_delete_session_db_cleared_before_http(db_session):
+    """P1 修复验证：DB session_id 在 HTTP DELETE 调用前已清为 None。
+
+    顺序：事务1 commit（session_id=None + stopped）-> 事务外 HTTP DELETE。
+    验证：HTTP 被调用时，DB session_id 应为 None（已 commit，无 404 阻断风险）。
+    """
+    ws, _ = _setup_workspace(db_session)
+    ap = AgentProcess(
+        id=str(uuid4()),
+        workspace_id=ws.id,
+        port=settings.opencode_serve_port,
+        status="running",
+        session_id="ses_order",
+    )
+    db_session.add(ap)
+    db_session.flush()
+
+    http_call_db_state = []
+
+    def _track_http(*args, **kwargs):
+        # HTTP 被调用时查 DB：session_id 应已 None（事务1 已 commit）
+        db_session.refresh(ap)
+        http_call_db_state.append(ap.session_id)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    with patch("app.clients.opencode.httpx.delete", side_effect=_track_http):
+        client = OpenCodeClient(db_session)
+        client.delete_session(ws.id)
+
+    # HTTP 调用时 DB session_id 应为 None（事务1 已 commit 清理）
+    assert http_call_db_state == [None]
 
 
 # ---- shutdown_serve（P1-3：全局进程清理）----
