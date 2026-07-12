@@ -387,6 +387,75 @@ class OpenCodeClient:
             if own_session:
                 db.close()
 
+    def delete_session(self, workspace_id: str) -> bool:
+        """退掉该 workspace 的 opencode session（DELETE /session/:sessionID）。
+
+        方案 B（D26）：3 次不通过时退该 task 的 session，全局 serve 进程保留
+        （服务其他 workspace）。用户可用 session_id 在本地接管，"/pm 确认完成"
+        后系统重新建/复用 session 驱动后续任务（doc/06 Story4A 步骤8）。
+
+        铁律 §3#3（事务内禁止 IO/HTTP）：事务1 查 session_id -> 事务外 HTTP DELETE
+        -> 事务2 回填（session_id=None, status=stopped）。与 _ensure_session 同模式。
+
+        签名取 workspace_id（与 shutdown 一致）：调用方（3 次重试逻辑）持 workspace_id，
+        内部查 agent_processes 拿 session_id 再 DELETE，避免调用方再查一次 DB。
+
+        失败非阻塞：HTTP DELETE 失败记日志返回 False，不抛（参考 dispatch_* 模式）。
+        不调 shutdown_serve（全局 serve 保留）。
+
+        Args:
+            workspace_id: 工作空间 ID。
+
+        Returns:
+            True 如果成功退 session，False 如果无 session/无记录/HTTP 失败。
+        """
+        # ---- 事务1：查 session_id（纯读，无写）----
+        own_session = self.db is None
+        db = self.db or SessionLocal()
+        try:
+            ap = db.scalar(select(AgentProcess).where(AgentProcess.workspace_id == workspace_id))
+            if ap is None or ap.session_id is None:
+                logger.info("delete_session: 无 session 可退 ws=%s", workspace_id)
+                return False
+            session_id = ap.session_id
+        finally:
+            if own_session:
+                db.close()
+
+        # ---- 事务外：DELETE /session/{id} 退 session（IO/HTTP，铁律 §3#3）----
+        try:
+            resp = httpx.delete(f"{self.base_url}/session/{session_id}", timeout=30)
+            resp.raise_for_status()
+        except Exception:
+            logger.exception(
+                "delete_session HTTP 退 session 失败: ws=%s sid=%s", workspace_id, session_id
+            )
+            return False
+
+        # ---- 事务2：回填 session_id=None, status=stopped（纯 DB，无 IO）----
+        db2 = SessionLocal() if own_session else self.db  # noqa: PLW2901
+        try:
+            ap2 = db2.scalar(select(AgentProcess).where(AgentProcess.workspace_id == workspace_id))
+            if ap2:
+                ap2.session_id = None
+                ap2.status = "stopped"
+                db2.commit()
+            logger.info(
+                "delete_session: 已退 session ws=%s sid=%s（全局 serve 保留）",
+                workspace_id,
+                session_id,
+            )
+            return True
+        except Exception:
+            db2.rollback()
+            logger.exception(
+                "delete_session 事务2 回填失败: ws=%s sid=%s", workspace_id, session_id
+            )
+            return False
+        finally:
+            if own_session:
+                db2.close()
+
     @classmethod
     def shutdown_serve(cls) -> None:
         """关闭全局 opencode serve 子进程（应用退出时调用，P1-3）。
