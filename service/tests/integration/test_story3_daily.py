@@ -297,15 +297,18 @@ def test_webhook_story3_invalid_push_source_returns_1002(client, db_session, mon
     )
 
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story3_确认今日计划",
-                "user_id": "u1",
-                "date": "2026-07-06",
-                "task_ids": [task.id],
-                "pre_subtasks": [],
-                "push_source": "card",  # 非法值
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story3_确认今日计划",
+                    "user_id": "u1",
+                    "date": "2026-07-06",
+                    "task_ids": [task.id],
+                    "pre_subtasks": [],
+                    "push_source": "card",  # 非法值
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)
@@ -333,14 +336,17 @@ def test_webhook_story3_confirm(client, db_session, monkeypatch):
     )
 
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story3_确认今日计划",
-                "user_id": "u1",
-                "date": "2026-07-06",
-                "task_ids": [task.id],
-                "pre_subtasks": [{"name": "准备环境", "type": "前置"}],
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story3_确认今日计划",
+                    "user_id": "u1",
+                    "date": "2026-07-06",
+                    "task_ids": [task.id],
+                    "pre_subtasks": [{"name": "准备环境", "type": "前置"}],
+                }
+            },
         }
     }
     resp = client.post(_WEBHOOK, json=payload)
@@ -369,14 +375,17 @@ def test_webhook_story3_confirm_duplicate_409(client, db_session, monkeypatch):
     )
 
     payload = {
-        "action": {
-            "value": {
-                "action_id": "story3_确认今日计划",
-                "user_id": "u1",
-                "date": "2026-07-06",
-                "task_ids": [task.id],
-                "pre_subtasks": [],
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": "story3_确认今日计划",
+                    "user_id": "u1",
+                    "date": "2026-07-06",
+                    "task_ids": [task.id],
+                    "pre_subtasks": [],
+                }
+            },
         }
     }
     resp1 = client.post(_WEBHOOK, json=payload)
@@ -389,7 +398,7 @@ def test_webhook_story3_confirm_duplicate_409(client, db_session, monkeypatch):
 
 def test_webhook_unknown_action_still_noop(client):
     """未知 action_id -> noop（S2 测试已覆盖，确保不影响）。"""
-    payload = {"action": {"value": {"action_id": "unknown.x"}}}
+    payload = {"event": {"context": {}, "action": {"value": {"action_id": "unknown.x"}}}}
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     assert resp.json()["code"] == 0

@@ -283,13 +283,16 @@ def test_webhook_story4a_confirm(client, db_session):
         patch.object(task_app_svc, "emit"),
     ):
         payload = {
-            "action": {
-                "value": {
-                    "action_id": "story4A_验收通过",
-                    "task_id": task.id,
-                    "user_id": "u1",
-                    "workspace_progress_ids": [],
-                }
+            "event": {
+                "context": {"open_message_id": "om_test"},
+                "action": {
+                    "value": {
+                        "action_id": "story4A_验收通过",
+                        "task_id": task.id,
+                        "user_id": "u1",
+                        "workspace_progress_ids": [],
+                    }
+                },
             }
         }
         resp = client.post(_WEBHOOK, json=payload)
@@ -314,13 +317,16 @@ def test_webhook_story4a_reject(client, db_session):
         patch.object(task_app_svc, "set_task_timeout"),
     ):
         payload = {
-            "action": {
-                "value": {
-                    "action_id": "story4A_需要修改",
-                    "task_id": task.id,
-                    "user_id": "u1",
-                    "feedback": "缺少字段",
-                }
+            "event": {
+                "context": {"open_message_id": "om_test"},
+                "action": {
+                    "value": {
+                        "action_id": "story4A_需要修改",
+                        "task_id": task.id,
+                        "user_id": "u1",
+                        "feedback": "缺少字段",
+                    }
+                },
             }
         }
         resp = client.post(_WEBHOOK, json=payload)

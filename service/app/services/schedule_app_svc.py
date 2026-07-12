@@ -12,13 +12,16 @@ doc/04 §3.3 事务 6 步：
 铁律：事务内仅 DB 写 + 即时级联（纯 DB）；mkdir/git init 事务后异步（§3#3/#4）。
 """
 
+import logging
 from datetime import date
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.clients.feishu import FeishuClient, build_schedule_card_a, build_schedule_card_b
 from app.clients.workspace import is_path_valid
 from app.core import audit, cascade, state_machine
+from app.core.card_registry import set_card_context
 from app.core.exceptions import (
     BadRequestError,
     ConflictError,
@@ -26,6 +29,9 @@ from app.core.exceptions import (
     QuotaExceededError,
 )
 from app.core.times import now_utc_naive
+from app.db.session import SessionLocal
+from app.models.goal import Goal
+from app.models.theme import Theme
 from app.models.workspace import Workspace
 from app.repositories.goal import GoalRepository
 from app.repositories.phase import PhaseRepository
@@ -40,6 +46,8 @@ from app.schemas.schedule import (
 
 # 全局进行中阶段上限（doc/03 8.9）
 MAX_ACTIVE_PHASES = 3
+
+logger = logging.getLogger(__name__)
 
 
 class ScheduleAppSvc:
@@ -264,3 +272,73 @@ class ScheduleAppSvc:
             workspace_managed=workspace.managed,
             workspace_status=workspace.status,
         )
+
+    # ---- 推卡入口（schema 2.0，doc/09 §S2）----
+
+    def push_schedule_card(
+        self,
+        goal_name: str,
+        themes: list[dict],
+        chat_id: str,
+        h5_url: str = "",
+    ) -> str | None:
+        """推调度激活卡片 A-选专题（schema 2.0，doc/09 §S2 状态1）。
+
+        事务后异步 IO（铁律 §3#3）：调 build_schedule_card_a + FeishuClient.send_card。
+        send_card 返回 message_id 后存 Redis 映射 card:<message_id> ->
+        {type:"schedule_a", goal_id}，供 next_btn form_submit 回调反查 goal_id
+        （P2 路由缺口落地，doc/09 §S2 状态1->2）。
+
+        :param themes: 专题列表，每项含 theme_id/name/type；首项可含 goal_id
+            （存映射用，builder 不渲染 goal_id）。
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_schedule_card_a(goal_name, themes, h5_url)
+        message_id = FeishuClient().send_card(chat_id, card)
+        if message_id:
+            # next_btn 是 form_submit（无 action_id/goal_id），回调靠 message_id 反查
+            goal_id = themes[0].get("goal_id", "") if themes else ""
+            set_card_context(message_id, {"type": "schedule_a", "goal_id": goal_id})
+        return message_id
+
+    @staticmethod
+    def patch_to_card_b_async(message_id: str, theme_ids: list[str], goal_id: str) -> None:
+        """事务后异步：patch 卡片 A -> B（doc/09 §S2 状态1->2）。
+
+        查每个选中专题的第 1 个未开始阶段 -> build_schedule_card_b -> update_card。
+        铁律 §3#3：HTTP（update_card）事务后异步，满足飞书 3 秒回调。
+        独立 session（BackgroundTasks 调用）。
+
+        :param theme_ids: 用户勾选的专题 ID 列表（从 form_value.theme_<id> 提取）。
+        :param goal_id: 卡片关联的目标 ID（从 card_registry 反查，可能为空）。
+        """
+        db = SessionLocal()
+        try:
+            goal = db.get(Goal, goal_id) if goal_id else None
+            goal_name = goal.name if goal else ""
+            phases: list[dict] = []
+            for theme_id in theme_ids:
+                theme = db.get(Theme, theme_id)
+                if theme is None:
+                    continue
+                theme_phases = PhaseRepository(db).list_by_theme(theme_id)
+                locked = next((p for p in theme_phases if p.status == "未开始"), None)
+                if locked is None:
+                    continue
+                phases.append(
+                    {
+                        "theme_id": theme_id,
+                        "theme_name": theme.name,
+                        "phase_name": locked.name,
+                        "type": theme.type,
+                    }
+                )
+            if not phases:
+                logger.warning("patch_to_card_b_async: 无可激活阶段, themes=%s", theme_ids)
+                return
+            card = build_schedule_card_b(goal_name, phases)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("patch_to_card_b_async 失败: message_id=%s", message_id)
+        finally:
+            db.close()

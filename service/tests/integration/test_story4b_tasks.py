@@ -270,14 +270,18 @@ def test_subtask_get_not_found(client, db_session):
 
 
 def _card_value(action_id, task_id, post_subtasks=None):
+    """构造 schema 2.0 卡片回调 payload（doc/09 V2：event.action.value）。"""
     return {
-        "action": {
-            "value": {
-                "action_id": action_id,
-                "task_id": task_id,
-                "user_id": "user_001",
-                "post_subtasks": post_subtasks or [],
-            }
+        "event": {
+            "context": {"open_message_id": "om_test"},
+            "action": {
+                "value": {
+                    "action_id": action_id,
+                    "task_id": task_id,
+                    "user_id": "user_001",
+                    "post_subtasks": post_subtasks or [],
+                }
+            },
         }
     }
 
