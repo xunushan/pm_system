@@ -3,22 +3,29 @@
 重点覆盖 issue #14：app_id 为空时所有推送方法 graceful skip（不调 httpx），
 避免请求 token API 触发 KeyError: 'tenant_access_token'。
 
-另含 9 个 build_*_card schema 2.0 结构校验测试（doc/09 实证规格）。
+另含 15 个 build_*_card schema 2.0 结构校验测试（doc/09 实证规格）：
+  PR-A 9 个现有 builder + PR-B 6 个新 builder。
 """
 
 from unittest.mock import MagicMock, patch
 
 from app.clients.feishu import (
     FeishuClient,
+    build_daily_plan_card,
     build_daily_summary_card,
     build_deadline_reminder_card,
     build_goal_completed_card,
     build_phase_linking_card,
+    build_plan_overview_card,
     build_plan_reminder_card,
+    build_schedule_card_a,
+    build_schedule_card_b,
     build_start_date_reminder_card,
     build_summary_reminder_card,
+    build_task_complete_card,
     build_theme_completed_card,
     build_verification_card,
+    build_weekly_summary_card,
 )
 
 
@@ -449,3 +456,479 @@ def test_build_summary_reminder_card_structure():
     _assert_schema2(card)
     buttons = _find_buttons(card)
     assert len(buttons) == 0, "日终提醒卡不应有按钮"
+
+
+# ===========================================================================
+# PR-B 新增 builder 测试（6 个，doc/09 实证规格）
+# ===========================================================================
+
+
+# ===== build_plan_overview_card（doc/09 §S1 确认前，无 form + callback 按钮）=====
+
+
+def test_build_plan_overview_card_structure():
+    """build_plan_overview_card: schema 2.0 方案总览卡，markdown + 确认方案 callback 按钮。"""
+    card = build_plan_overview_card(
+        goal_name="知识库构建",
+        theme_count=4,
+        phase_count=12,
+        task_count=36,
+        draft_id="draft_abc",
+    )
+    _assert_schema2(card)
+
+    # 无 form（纯 markdown + 按钮）
+    form = _find_form(card)
+    assert form is None, "方案总览卡不应有 form"
+
+    # 确认方案按钮（form 外 callback）
+    buttons = _find_buttons(card)
+    assert len(buttons) == 1, "应有 1 个确认方案按钮"
+    _assert_callback_button(buttons[0])
+    value = buttons[0]["behaviors"][0]["value"]
+    assert value["action_id"] == "story1_确认方案"
+    assert value["draft_id"] == "draft_abc"
+
+    # markdown 含目标名 + 统计数字
+    md = card["body"]["elements"][0]
+    assert "知识库构建" in md["content"]
+    assert "4" in md["content"]  # theme_count
+    assert "12" in md["content"]  # phase_count
+    assert "36" in md["content"]  # task_count
+
+
+def test_build_plan_overview_card_header_blue():
+    """build_plan_overview_card: header 应为 blue（待操作）。"""
+    card = build_plan_overview_card("目标", 1, 1, 1, "d1")
+    assert card["header"]["template"] == "blue", "确认前 header 应为 blue"
+
+
+# ===== build_schedule_card_a（doc/09 §S2 状态1，form + checker 专题 + next_btn）=====
+
+
+def test_build_schedule_card_a_structure():
+    """build_schedule_card_a: schema 2.0 调度卡 A，form 含每专题 checker + next_btn form_submit。"""
+    card = build_schedule_card_a(
+        goal_name="知识库构建",
+        themes=[
+            {"theme_id": "t1", "name": "知识获取", "type": "learning"},
+            {"theme_id": "t2", "name": "知识沉淀", "type": "learning"},
+        ],
+    )
+    _assert_schema2(card)
+
+    form = _find_form(card)
+    assert form is not None, "调度卡 A 应含 form"
+    assert form["name"] == "schedule_form_a"
+
+    form_elements = form["elements"]
+    # 每专题一个 checker
+    checkers = [el for el in form_elements if el.get("tag") == "checker"]
+    assert len(checkers) == 2, "应有 2 个专题 checker"
+
+    # checker name = theme_{id}
+    assert checkers[0]["name"] == "theme_t1"
+    assert checkers[1]["name"] == "theme_t2"
+
+    # checker text 含专题名 + 类型
+    assert "知识获取" in checkers[0]["text"]["content"]
+    assert "learning" in checkers[0]["text"]["content"]
+
+    # next_btn（form_submit，不带 behaviors）
+    next_btn = next(el for el in form_elements if el.get("name") == "next_btn")
+    _assert_form_submit_button(next_btn, "next_btn")
+    assert next_btn["type"] == "primary"
+
+
+def test_build_schedule_card_a_h5_url():
+    """build_schedule_card_a: 传 h5_url 时 markdown 含链接。"""
+    card = build_schedule_card_a(
+        goal_name="目标",
+        themes=[{"theme_id": "t1", "name": "专题", "type": "dev"}],
+        h5_url="https://h5.example.com/config",
+    )
+    elements = card["body"]["elements"]
+    md_link = next(
+        el for el in elements if el.get("tag") == "markdown" and "配置页" in el.get("content", "")
+    )
+    assert "https://h5.example.com/config" in md_link["content"], "应含 h5_url 链接"
+
+
+def test_build_schedule_card_a_no_h5_url():
+    """build_schedule_card_a: 不传 h5_url 时纯文字提示（无链接）。"""
+    card = build_schedule_card_a(
+        goal_name="目标",
+        themes=[],
+    )
+    elements = card["body"]["elements"]
+    md_link = next(
+        el for el in elements if el.get("tag") == "markdown" and "配置页" in el.get("content", "")
+    )
+    assert "(" not in md_link["content"].split("配置页")[1], "不传 h5_url 时不应有 markdown 链接"
+
+
+# ===== build_schedule_card_b（doc/09 §S2 状态2，form + date_picker + confirm_btn）=====
+
+
+def test_build_schedule_card_b_structure():
+    """build_schedule_card_b: date_picker per phase + confirm_btn form_submit。"""
+    card = build_schedule_card_b(
+        goal_name="知识库构建",
+        phases=[
+            {
+                "theme_id": "t1",
+                "theme_name": "知识获取",
+                "phase_name": "阶段1：知识获取",
+                "type": "learning",
+            },
+            {
+                "theme_id": "t2",
+                "theme_name": "知识沉淀",
+                "phase_name": "阶段1：知识沉淀",
+                "type": "learning",
+            },
+        ],
+    )
+    _assert_schema2(card)
+
+    form = _find_form(card)
+    assert form is not None, "调度卡 B 应含 form"
+    assert form["name"] == "schedule_form_b"
+
+    form_elements = form["elements"]
+    # 每阶段一个 div + 一个 date_picker
+    date_pickers = [el for el in form_elements if el.get("tag") == "date_picker"]
+    assert len(date_pickers) == 2, "应有 2 个 date_picker"
+
+    # date_picker name = dl_theme_{id}（doc/09 §S2 状态2）
+    assert date_pickers[0]["name"] == "dl_theme_t1"
+    assert date_pickers[1]["name"] == "dl_theme_t2"
+
+    # date_picker required=true
+    for dp in date_pickers:
+        assert dp["required"] is True, "date_picker 应 required=true"
+        assert dp["placeholder"]["tag"] == "plain_text"
+
+    # div 含阶段名（lark_md）
+    divs = [el for el in form_elements if el.get("tag") == "div"]
+    assert len(divs) == 2, "应有 2 个 div"
+    assert divs[0]["text"]["tag"] == "lark_md"
+    assert "知识获取" in divs[0]["text"]["content"]
+    assert "阶段1：知识获取" in divs[0]["text"]["content"]
+
+    # confirm_btn（form_submit）
+    confirm_btn = next(el for el in form_elements if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+    assert confirm_btn["type"] == "primary"
+
+
+def test_build_schedule_card_b_no_behaviors_on_submit():
+    """doc/09 V1: form_submit 按钮不能带 behaviors。"""
+    card = build_schedule_card_b("目标", [])
+    form = _find_form(card)
+    assert form is not None
+    for el in form["elements"]:
+        if el.get("tag") == "button" and el.get("action_type") == "form_submit":
+            assert "behaviors" not in el, f"form_submit 按钮 {el.get('name')} 不能带 behaviors"
+
+
+# ===== build_daily_plan_card（doc/09 §S3 状态1，form + checker 候选任务 + 前置）=====
+
+
+def test_build_daily_plan_card_structure():
+    """build_daily_plan_card: schema 2.0 今日计划卡，checker 候选任务 + 前置 + confirm_btn。"""
+    card = build_daily_plan_card(
+        date_str="2026-07-10",
+        candidate_tasks=[
+            {
+                "task_id": "t1",
+                "name": "信息获取渠道设计",
+                "executor": "human",
+                "phase_info": "知识获取/阶段1",
+            },
+            {
+                "task_id": "t2",
+                "name": "部署 RSSHub",
+                "executor": "agent",
+                "phase_info": "知识获取/阶段1",
+            },
+        ],
+        prerequisites=[
+            {"subtask_id": "p1", "name": "准备 RSSHub 环境"},
+            {"subtask_id": "p2", "name": "阅读 SimHash 原理"},
+        ],
+    )
+    _assert_schema2(card)
+
+    form = _find_form(card)
+    assert form is not None, "今日计划卡应含 form"
+    assert form["name"] == "daily_plan_form"
+
+    form_elements = form["elements"]
+
+    # 候选任务 checker
+    checker_t1 = next(el for el in form_elements if el.get("name") == "task_t1")
+    assert checker_t1["tag"] == "checker"
+    assert "信息获取渠道设计" in checker_t1["text"]["content"]
+    assert "[人]" in checker_t1["text"]["content"], "human executor 应显示 [人]"
+    assert "知识获取/阶段1" in checker_t1["text"]["content"], "应含 phase_info"
+
+    checker_t2 = next(el for el in form_elements if el.get("name") == "task_t2")
+    assert checker_t2["tag"] == "checker"
+    assert "[智能体]" in checker_t2["text"]["content"], "agent executor 应显示 [智能体]"
+
+    # 前置 checker（独立组）
+    checker_p1 = next(el for el in form_elements if el.get("name") == "pre_p1")
+    assert checker_p1["tag"] == "checker"
+    assert "准备 RSSHub 环境" in checker_p1["text"]["content"]
+
+    checker_p2 = next(el for el in form_elements if el.get("name") == "pre_p2")
+    assert checker_p2["tag"] == "checker"
+
+    # confirm_btn（form_submit）
+    confirm_btn = next(el for el in form_elements if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+
+
+def test_build_daily_plan_card_no_prerequisites():
+    """build_daily_plan_card: 无前置时不渲染前置区块。"""
+    card = build_daily_plan_card(
+        date_str="2026-07-10",
+        candidate_tasks=[{"task_id": "t1", "name": "任务", "executor": "human"}],
+        prerequisites=[],
+    )
+    form = _find_form(card)
+    assert form is not None
+    form_elements = form["elements"]
+    # 无前置 checker
+    pre_checkers = [el for el in form_elements if el.get("name", "").startswith("pre_")]
+    assert len(pre_checkers) == 0, "无前置时不应有 pre_ checker"
+    # 仍含确认按钮
+    confirm_btn = next(el for el in form_elements if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+
+
+def test_build_daily_plan_card_empty_tasks():
+    """build_daily_plan_card: 无候选任务时仍含确认按钮。"""
+    card = build_daily_plan_card(
+        date_str="2026-07-10",
+        candidate_tasks=[],
+        prerequisites=[],
+    )
+    _assert_schema2(card)
+    form = _find_form(card)
+    assert form is not None
+    confirm_btn = next(el for el in form["elements"] if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+
+
+# ===== build_task_complete_card（doc/09 §S4A 场景4，已完成展示 + 待确认 checker + reassign）=====
+
+
+def test_build_task_complete_card_structure():
+    """build_task_complete_card: 已完成 div + 待确认 checker + confirm_btn。"""
+    card = build_task_complete_card(
+        workspace_name="ws_test",
+        completed_tasks=[
+            {"name": "任务A", "executor": "human"},
+            {"name": "任务B", "executor": "agent"},
+        ],
+        pending_tasks=[
+            {"id": "t1", "name": "任务C", "executor": "human", "is_agent": False},
+            {"id": "t2", "name": "任务D", "executor": "agent", "is_agent": True},
+        ],
+    )
+    _assert_schema2(card)
+
+    elements = card["body"]["elements"]
+    # 已完成任务（div lark_md，不可操作）
+    divs = [el for el in elements if el.get("tag") == "div"]
+    assert len(divs) == 2, "应有 2 个已完成任务 div"
+    assert divs[0]["text"]["tag"] == "lark_md"
+    assert "任务A" in divs[0]["text"]["content"]
+    assert "[人]" in divs[0]["text"]["content"]
+    assert "任务B" in divs[1]["text"]["content"]
+    assert "[智能体]" in divs[1]["text"]["content"]
+
+    form = _find_form(card)
+    assert form is not None, "确认完成卡应含 form"
+    assert form["name"] == "confirm_complete_form"
+
+    form_elements = form["elements"]
+    # 待确认任务 checker（name=task_{id}）
+    checker_t1 = next(el for el in form_elements if el.get("name") == "task_t1")
+    assert checker_t1["tag"] == "checker"
+    assert "任务C" in checker_t1["text"]["content"]
+    assert "[人]" in checker_t1["text"]["content"]
+
+    checker_t2 = next(el for el in form_elements if el.get("name") == "task_t2")
+    assert checker_t2["tag"] == "checker"
+    assert "[智能体]" in checker_t2["text"]["content"]
+
+    # confirm_btn（form_submit）
+    confirm_btn = next(el for el in form_elements if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+
+
+def test_build_task_complete_card_reassign_only_for_agent():
+    """reassign checker 只对 is_agent 任务出现（doc/09 §S4A 实现注意）。"""
+    card = build_task_complete_card(
+        workspace_name="ws",
+        completed_tasks=[],
+        pending_tasks=[
+            {"id": "t1", "name": "人任务", "executor": "human", "is_agent": False},
+            {"id": "t2", "name": "智能体任务", "executor": "agent", "is_agent": True},
+        ],
+    )
+    form = _find_form(card)
+    assert form is not None
+    form_elements = form["elements"]
+
+    # 人任务：无 reassign checker
+    reassign_t1 = next((el for el in form_elements if el.get("name") == "task_t1_reassign"), None)
+    assert reassign_t1 is None, "人任务不应有 reassign checker"
+
+    # 智能体任务：有 reassign checker
+    reassign_t2 = next((el for el in form_elements if el.get("name") == "task_t2_reassign"), None)
+    assert reassign_t2 is not None, "智能体任务应有 reassign checker"
+    assert reassign_t2["tag"] == "checker"
+    assert "改交智能体重新执行" in reassign_t2["text"]["content"]
+
+
+def test_build_task_complete_card_reassign_name_association():
+    """reassign checker name 与 confirm checker 同 id（task_{id} vs task_{id}_reassign）。
+
+    doc/09 §S4A 实现注意：builder 要让两个 checker 的 name 能被 webhook 关联。
+    """
+    card = build_task_complete_card(
+        workspace_name="ws",
+        completed_tasks=[],
+        pending_tasks=[
+            {"id": "abc-123", "name": "任务", "executor": "agent", "is_agent": True},
+        ],
+    )
+    form = _find_form(card)
+    form_elements = form["elements"]
+    # task_abc-123 和 task_abc-123_reassign 同 id
+    assert any(el.get("name") == "task_abc-123" for el in form_elements)
+    assert any(el.get("name") == "task_abc-123_reassign" for el in form_elements)
+
+
+def test_build_task_complete_card_no_completed():
+    """build_task_complete_card: 无已完成任务时显示「（无）」。"""
+    card = build_task_complete_card(
+        workspace_name="ws",
+        completed_tasks=[],
+        pending_tasks=[],
+    )
+    _assert_schema2(card)
+    elements = card["body"]["elements"]
+    # 应有 div 显示「（无）」
+    no_task_div = next(
+        el
+        for el in elements
+        if el.get("tag") == "div" and "（无）" in el.get("text", {}).get("content", "")
+    )
+    assert no_task_div is not None, "无已完成任务时应显示「（无）」"
+    # 仍含 form + confirm 按钮
+    form = _find_form(card)
+    assert form is not None
+    confirm_btn = next(el for el in form["elements"] if el.get("name") == "confirm_btn")
+    _assert_form_submit_button(confirm_btn, "confirm_btn")
+
+
+# ===== build_weekly_summary_card（doc/09 §S6 状态1，纯展示 + 已阅 callback）=====
+
+
+def test_build_weekly_summary_card_structure():
+    """build_weekly_summary_card: 含任务列表/趋势/健康度/建议 + 已阅 callback。"""
+    card = build_weekly_summary_card(
+        week="2026-W28",
+        start_date="2026-07-06",
+        end_date="2026-07-12",
+        completed_tasks=[
+            {"date": "07-06", "task_name": "信息获取渠道设计", "executor": "human"},
+            {"date": "07-08", "task_name": "部署 RSSHub", "executor": "agent"},
+        ],
+        daily_trends=[
+            {"date": "07-06", "weekday": "周一", "completed": 1, "total": 2},
+            {"date": "07-07", "weekday": "周二", "completed": 0, "total": 1},
+        ],
+        phase_health=[
+            {"name": "阶段1", "completed": 3, "total": 5, "status": "进行中"},
+        ],
+        agent_output_count=7,
+        next_week_advice="加快阶段1进度，优先完成剩余2个任务",
+    )
+    _assert_schema2(card)
+
+    # 无 form（纯展示 + 已阅按钮）
+    form = _find_form(card)
+    assert form is None, "周总结卡不应有 form"
+
+    elements = card["body"]["elements"]
+    # 验证各 section 的 markdown 内容
+    all_md = [el for el in elements if el.get("tag") == "markdown"]
+    all_content = "\n".join(el["content"] for el in all_md)
+
+    # 日期范围
+    assert "2026-07-06" in all_content and "2026-07-12" in all_content
+    # 本周完成任务列表（含日期 + 任务名 + 执行主体）
+    assert "07-06" in all_content and "信息获取渠道设计" in all_content
+    assert "[人]" in all_content
+    assert "07-08" in all_content and "部署 RSSHub" in all_content
+    assert "[智能体]" in all_content
+    # 每日完成趋势
+    assert "周一" in all_content and "1/2" in all_content
+    # 阶段健康度
+    assert "阶段1" in all_content and "3/5" in all_content and "进行中" in all_content
+    # 智能体产出
+    assert "7" in all_content and "个文件" in all_content
+    # 下周建议
+    assert "加快阶段1进度" in all_content
+
+    # 已阅按钮（form 外 callback）
+    buttons = _find_buttons(card)
+    assert len(buttons) == 1, "应有 1 个已阅按钮"
+    _assert_callback_button(buttons[0])
+    value = buttons[0]["behaviors"][0]["value"]
+    assert value["action_id"] == "story6_已阅周总结"
+    assert value["week"] == "2026-W28"
+
+
+def test_build_weekly_summary_card_empty_tasks():
+    """build_weekly_summary_card: 无完成任务时显示「（本周无完成任务）」。"""
+    card = build_weekly_summary_card(
+        week="2026-W28",
+        start_date="2026-07-06",
+        end_date="2026-07-12",
+        completed_tasks=[],
+        daily_trends=[],
+        phase_health=[],
+        agent_output_count=0,
+        next_week_advice="无建议",
+    )
+    _assert_schema2(card)
+    all_md = [el for el in card["body"]["elements"] if el.get("tag") == "markdown"]
+    all_content = "\n".join(el["content"] for el in all_md)
+    assert "（本周无完成任务）" in all_content, "无完成任务时应显示提示"
+    # 仍含已阅按钮
+    buttons = _find_buttons(card)
+    assert len(buttons) == 1, "即使无数据也应有已阅按钮"
+
+
+def test_weekly_summary_card_no_subtask_stats():
+    """doc/09 §S6 实现注意：周总结不含子任务统计。"""
+    card = build_weekly_summary_card(
+        week="2026-W28",
+        start_date="2026-07-06",
+        end_date="2026-07-12",
+        completed_tasks=[],
+        daily_trends=[],
+        phase_health=[],
+        agent_output_count=0,
+        next_week_advice="无",
+    )
+    all_md = [el for el in card["body"]["elements"] if el.get("tag") == "markdown"]
+    all_content = "\n".join(el["content"] for el in all_md)
+    assert "子任务" not in all_content, "周总结不应含子任务统计"
