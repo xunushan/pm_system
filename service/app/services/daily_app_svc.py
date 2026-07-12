@@ -475,5 +475,17 @@ class DailyAppSvc:
         card = build_daily_plan_card(date_str, candidate_tasks, prerequisites)
         message_id = FeishuClient().send_card(chat_id, card)
         if message_id:
-            set_card_context(message_id, {"type": "daily_plan"})
+            # confirm_btn 是 form_submit（无 action_id/task_id），回调靠 message_id 反查。
+            # 存 date + prerequisites 映射，供 webhook 从 form_value.pre_<id> 查前置名称
+            # （form_value 只给 bool，名称从 context 查）。
+            set_card_context(
+                message_id,
+                {
+                    "type": "daily_plan",
+                    "date": date_str,
+                    "prerequisites": [
+                        {"id": p["subtask_id"], "name": p["name"]} for p in prerequisites
+                    ],
+                },
+            )
         return message_id

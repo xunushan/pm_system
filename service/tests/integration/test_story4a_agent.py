@@ -271,11 +271,20 @@ def test_opencode_timeout_callback(client, db_session):
 # ===== webhook story4A =====
 
 
-def test_webhook_story4a_confirm(client, db_session):
-    """webhook story4A_验收通过 -> output_confirm。"""
+def test_webhook_story4a_confirm(client, db_session, monkeypatch):
+    """webhook btn_pass (verification) -> output_confirm。
+
+    task_id 靠 message_id 反查 card_registry（type=verification）。
+    """
     goal, themes, phases, ws, tasks = _make_full_tree(db_session)
     task = tasks[0]
     db_session.flush()
+
+    # mock card_registry 反查 task_id（verification 卡上下文）
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "verification", "task_id": task.id},
+    )
 
     with (
         patch.object(task_app_svc.state_machine, "validate_transition"),
@@ -285,14 +294,7 @@ def test_webhook_story4a_confirm(client, db_session):
         payload = {
             "event": {
                 "context": {"open_message_id": "om_test"},
-                "action": {
-                    "value": {
-                        "action_id": "story4A_验收通过",
-                        "task_id": task.id,
-                        "user_id": "u1",
-                        "workspace_progress_ids": [],
-                    }
-                },
+                "action": {"name": "btn_pass", "form_value": {}},
             }
         }
         resp = client.post(_WEBHOOK, json=payload)
@@ -303,14 +305,23 @@ def test_webhook_story4a_confirm(client, db_session):
     assert task.status == "已完成"
 
 
-def test_webhook_story4a_reject(client, db_session):
-    """webhook story4A_需要修改 -> output_reject。"""
+def test_webhook_story4a_reject(client, db_session, monkeypatch):
+    """webhook btn_reject (verification) -> output_reject。
+
+    feedback 从 form_value.feedback 读（input name=feedback，doc/09 V7 + issue#20）。
+    task_id 靠 message_id 反查 card_registry。
+    """
     goal, themes, phases, ws, tasks = _make_full_tree(db_session)
     task = tasks[0]
     task.retry_count = 0
     ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
     db_session.add(ap)
     db_session.flush()
+
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "verification", "task_id": task.id},
+    )
 
     with (
         patch.object(task_app_svc.OpenCodeClient, "dispatch_task"),
@@ -320,12 +331,8 @@ def test_webhook_story4a_reject(client, db_session):
             "event": {
                 "context": {"open_message_id": "om_test"},
                 "action": {
-                    "value": {
-                        "action_id": "story4A_需要修改",
-                        "task_id": task.id,
-                        "user_id": "u1",
-                        "feedback": "缺少字段",
-                    }
+                    "name": "btn_reject",
+                    "form_value": {"feedback": "缺少字段"},
                 },
             }
         }

@@ -1,6 +1,8 @@
-"""Story2 集成测试：webhook schedule.confirm 回调（入口 B）。
+"""Story2 集成测试：webhook confirm_btn 确认调度回调（入口 B）。
 
-飞书 3 秒超时：回调仅 DB 写+级联后立即返回，工作空间初始化异步。
+schema 2.0 下确认调度按钮是 form_submit（name=confirm_btn，卡片 B）。
+date_picker form_value name=dl_theme_<theme_id>，值"2026-07-15 +0800"（doc/09 V7）。
+goal_id 靠 message_id 反查 card_registry（type=schedule_b）。
 """
 
 from app.models.phase import Phase
@@ -10,31 +12,33 @@ from tests._factory import make_tree
 _WEBHOOK = "/webhook/feishu/card"
 
 
-def _card_value(goal_id, items):
-    """构造 schema 2.0 卡片回调 payload（doc/09 V2：event.action.value）。"""
+def _confirm_btn_payload(message_id, form_value):
+    """构造 schema 2.0 form_submit 回调 payload（doc/09 V2）。"""
     return {
         "event": {
-            "context": {"open_message_id": "om_test"},
+            "context": {"open_message_id": message_id},
             "action": {
-                "value": {
-                    "action_id": "schedule.confirm",
-                    "user_id": "u1",
-                    "goal_id": goal_id,
-                    "items": items,
-                }
+                "name": "confirm_btn",
+                "form_value": form_value,
             },
         }
     }
 
 
-def test_webhook_schedule_confirm_activates(client, db_session):
-    """webhook schedule.confirm -> 激活 phase + 级联 + 建 workspace。"""
+def test_webhook_schedule_confirm_activates(client, db_session, monkeypatch):
+    """webhook confirm_btn (schedule_b) -> 激活 phase + 级联 + 建 workspace。"""
     goal, themes, _ = make_tree(db_session)
     db_session.flush()
 
-    payload = _card_value(
-        goal.id,
-        [{"theme_id": themes[0].id, "managed": True, "deadline": "2026-07-15"}],
+    # mock card_registry 反查 goal_id（schedule_b = 卡片 B 确认调度）
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
+    )
+
+    payload = _confirm_btn_payload(
+        "om_test",
+        {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"},
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
@@ -46,20 +50,37 @@ def test_webhook_schedule_confirm_activates(client, db_session):
     assert db_session.query(Workspace).count() == 1
 
 
-def test_webhook_schedule_confirm_quota_409(client, db_session):
+def test_webhook_schedule_confirm_quota_409(client, db_session, monkeypatch):
     """webhook 走同样名额校验 -> 409(1004 并发超限)。"""
     goal, themes, phases = make_tree(db_session, n_themes=4, phases_per_theme=1)
     for p in phases[:3]:
         p.status = "进行中"
     db_session.flush()
 
-    payload = _card_value(
-        goal.id,
-        [{"theme_id": themes[3].id, "managed": True, "deadline": "2026-07-15"}],
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
+    )
+
+    payload = _confirm_btn_payload(
+        "om_test",
+        {f"dl_theme_{themes[3].id}": "2026-07-15 +0800"},
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 409
     assert resp.json()["code"] == 1004
+
+
+def test_webhook_schedule_confirm_no_card_context(client, db_session, monkeypatch):
+    """card_registry 反查 None -> 1002（容错，不崩）。"""
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: None,
+    )
+    payload = _confirm_btn_payload("om_test", {"dl_theme_x": "2026-07-15 +0800"})
+    resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 1002
 
 
 def test_webhook_unknown_action_returns_noop(client):

@@ -282,7 +282,11 @@ def test_confirm_invalid_push_source_returns_422(client, db_session):
 
 
 def test_webhook_story3_invalid_push_source_returns_1002(client, db_session, monkeypatch):
-    """webhook story3 非法 push_source -> code 1002（ValidationError 捕获），回归 #13。"""
+    """webhook story3 非法 push_source -> 422 pydantic 校验，回归 #13。
+
+    schema 2.0 下 push_source 在 webhook 硬编码为 "manual"，
+    此测试改为通过 API 直传非法 push_source 验证 pydantic 校验仍生效。
+    """
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
     _activate(phases[0])
     from app.models.task import Task
@@ -290,38 +294,40 @@ def test_webhook_story3_invalid_push_source_returns_1002(client, db_session, mon
     task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
     db_session.flush()
 
-    monkeypatch.setattr(
-        daily_app_svc,
-        "SessionLocal",
-        sessionmaker(bind=db_session.bind, expire_on_commit=False),
-    )
-
-    payload = {
-        "event": {
-            "context": {"open_message_id": "om_test"},
-            "action": {
-                "value": {
-                    "action_id": "story3_确认今日计划",
-                    "user_id": "u1",
-                    "date": "2026-07-06",
-                    "task_ids": [task.id],
-                    "pre_subtasks": [],
-                    "push_source": "card",  # 非法值
-                }
-            },
-        }
+    body = {
+        "user_id": "u1",
+        "date": "2026-07-06",
+        "task_ids": [task.id],
+        "pre_subtasks": [],
+        "push_source": "card",  # 非法值
     }
-    resp = client.post(_WEBHOOK, json=payload)
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 1002
+    resp = client.post(f"{_API}/daily/confirm", json=body)
+    assert resp.status_code == 422
     assert db_session.query(DailyRecord).count() == 0
 
 
 # ===== webhook =====
 
 
+def _daily_plan_payload(message_id, form_value):
+    """构造 schema 2.0 form_submit 回调 payload（doc/09 V2）。"""
+    return {
+        "event": {
+            "context": {"open_message_id": message_id},
+            "action": {
+                "name": "confirm_btn",
+                "form_value": form_value,
+            },
+        }
+    }
+
+
 def test_webhook_story3_confirm(client, db_session, monkeypatch):
-    """webhook story3_确认今日计划 -> 确认事务。"""
+    """webhook confirm_btn (daily_plan) -> 确认事务。
+
+    form_value checker: task_<id>=true（勾选今日要做）+ pre_<id>=true（勾选前置）。
+    前置名称从 card_registry context 查（form_value 只给 bool）。
+    """
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
     _activate(phases[0])
     from app.models.task import Task
@@ -334,21 +340,21 @@ def test_webhook_story3_confirm(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
+    # mock card_registry 反查 daily_plan 上下文
+    pre_id = "pre-001"
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {
+            "type": "daily_plan",
+            "date": "2026-07-06",
+            "prerequisites": [{"id": pre_id, "name": "准备环境"}],
+        },
+    )
 
-    payload = {
-        "event": {
-            "context": {"open_message_id": "om_test"},
-            "action": {
-                "value": {
-                    "action_id": "story3_确认今日计划",
-                    "user_id": "u1",
-                    "date": "2026-07-06",
-                    "task_ids": [task.id],
-                    "pre_subtasks": [{"name": "准备环境", "type": "前置"}],
-                }
-            },
-        }
-    }
+    payload = _daily_plan_payload(
+        "om_test",
+        {f"task_{task.id}": True, f"pre_{pre_id}": True},
+    )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
     assert resp.json()["code"] == 0
@@ -373,21 +379,12 @@ def test_webhook_story3_confirm_duplicate_409(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_plan", "date": "2026-07-06", "prerequisites": []},
+    )
 
-    payload = {
-        "event": {
-            "context": {"open_message_id": "om_test"},
-            "action": {
-                "value": {
-                    "action_id": "story3_确认今日计划",
-                    "user_id": "u1",
-                    "date": "2026-07-06",
-                    "task_ids": [task.id],
-                    "pre_subtasks": [],
-                }
-            },
-        }
-    }
+    payload = _daily_plan_payload("om_test", {f"task_{task.id}": True})
     resp1 = client.post(_WEBHOOK, json=payload)
     assert resp1.status_code == 200
 
