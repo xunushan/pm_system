@@ -18,7 +18,9 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.clients.feishu import FeishuClient, build_weekly_summary_card
 from app.clients.fileio import write_weekly_md
+from app.core.card_registry import set_card_context
 from app.core.exceptions import ConflictError
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
@@ -148,3 +150,43 @@ class WeeklyAppSvc:
             return None
         finally:
             db.close()
+
+    # ---- 推卡入口（schema 2.0，doc/09 §S6）----
+
+    def push_weekly_summary_card(
+        self,
+        week: str,
+        start_date: str,
+        end_date: str,
+        completed_tasks: list[dict],
+        daily_trends: list[dict],
+        phase_health: list[dict],
+        agent_output_count: int,
+        next_week_advice: str,
+        chat_id: str,
+    ) -> str | None:
+        """推周总结卡片（schema 2.0，doc/09 §S6 状态1）。
+
+        事务后异步 IO（铁律 §3#3）：调 build_weekly_summary_card + FeishuClient.send_card。
+        send_card 返回 message_id 后存 Redis 映射 card:<message_id> ->
+        {type:"weekly_summary", week}，供 PR-D update_card 补全反查（P2 路由缺口落地）。
+
+        注意：已阅按钮是 form 外（action_id=story6_已阅周总结 + week），
+        回调直接从 action_value 取 week；本映射为 update_card 补全预留。
+
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_weekly_summary_card(
+            week,
+            start_date,
+            end_date,
+            completed_tasks,
+            daily_trends,
+            phase_health,
+            agent_output_count,
+            next_week_advice,
+        )
+        message_id = FeishuClient().send_card(chat_id, card)
+        if message_id:
+            set_card_context(message_id, {"type": "weekly_summary", "week": week})
+        return message_id

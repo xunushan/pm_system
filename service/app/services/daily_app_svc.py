@@ -24,8 +24,10 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.clients.feishu import FeishuClient, build_daily_plan_card
 from app.clients.fileio import write_daily_md
 from app.clients.opencode import OpenCodeClient
+from app.core.card_registry import set_card_context
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
@@ -448,3 +450,30 @@ class DailyAppSvc:
             return "learning"  # 防御性默认
         theme = self.theme_repo.get(phase.theme_id)
         return theme.type if theme is not None else "learning"
+
+    # ---- 推卡入口（schema 2.0，doc/09 §S3）----
+
+    def push_daily_plan_card(
+        self,
+        date_str: str,
+        candidate_tasks: list[dict],
+        prerequisites: list[dict],
+        chat_id: str,
+    ) -> str | None:
+        """推今日计划卡片（schema 2.0，doc/09 §S3 状态1）。
+
+        事务后异步 IO（铁律 §3#3）：调 build_daily_plan_card + FeishuClient.send_card。
+        send_card 返回 message_id 后存 Redis 映射 card:<message_id> ->
+        {type:"daily_plan"}，供 confirm_btn form_submit 回调反查（P2 路由缺口落地）。
+
+        注意：daily_record 在确认时才建（confirm），推卡时尚无 daily_id。
+        story3 确认按钮是 form_submit（name=confirm_btn），form_value checker
+        业务解析归 PR-D。
+
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_daily_plan_card(date_str, candidate_tasks, prerequisites)
+        message_id = FeishuClient().send_card(chat_id, card)
+        if message_id:
+            set_card_context(message_id, {"type": "daily_plan"})
+        return message_id

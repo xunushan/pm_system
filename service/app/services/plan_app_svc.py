@@ -24,7 +24,9 @@ from uuid import uuid4
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from app.clients.feishu import FeishuClient, build_plan_overview_card
 from app.config import settings
+from app.core.card_registry import set_card_context
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.models.goal import Goal
 from app.models.phase import Phase
@@ -146,6 +148,32 @@ class PlanAppSvc:
         )
         self.phase_repo.create(phase)
         return phase
+
+    def push_overview_card(
+        self,
+        goal_name: str,
+        theme_count: int,
+        phase_count: int,
+        task_count: int,
+        draft_id: str,
+        chat_id: str,
+    ) -> str | None:
+        """推方案总览卡片-确认前（schema 2.0，doc/09 §S1 确认前）。
+
+        事务后异步 IO（铁律 §3#3）：调 build_plan_overview_card + FeishuClient.send_card。
+        send_card 返回 message_id 后存 Redis 映射 card:<message_id> ->
+        {type:"plan_overview", draft_id}，供后续回调反查（P2 路由缺口落地）。
+
+        story1 确认按钮是 form 外（action_id=story1_确认方案 + draft_id），
+        回调直接从 action_value 取 draft_id；本映射为 PR-D update_card 补全预留。
+
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_plan_overview_card(goal_name, theme_count, phase_count, task_count, draft_id)
+        message_id = FeishuClient().send_card(chat_id, card)
+        if message_id:
+            set_card_context(message_id, {"type": "plan_overview", "draft_id": draft_id})
+        return message_id
 
     def _create_task(self, task_item: PlanTaskContent, phase_id: str) -> Task:
         task = Task(
