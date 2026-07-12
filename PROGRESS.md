@@ -38,7 +38,7 @@
 - [x] CLAUDE.md 铁律8 补 executor 可改 + 复用件表 opencode 方案 B 说明
 
 ### 修复（代码层）- 已完成
-- [x] **FIX-1**：S5 message_id 取法（双保险，PR #23 已合；实现时按 doc/09 V2 修正路径 event.context.open_message_id）
+- [x] **FIX-1**：S5 message_id 双保险取法框架已合（PR #23）；⚠️ 但 PR #23 取的是顶层 `payload.get("open_message_id")`，实测正确路径是 `payload["event"]["context"]["open_message_id"]`（doc/09 V2），正确路径修正归入 PR-C
 - [x] **FIX-2**：S4A 主任务下发（daily_app_svc 传 task，PR #23 已合）
 - [x] **PR-1**：chat_id_placeholder 修复（PR #22 已合）
 
@@ -48,7 +48,7 @@
 - [ ] **代码缺口-0**：opencode.py 补 `delete_session(session_id)`（调 `DELETE /session/:sessionID`），3 次不通过时退 session（D26）
 - [ ] **PR-A**：FeishuClient 适配 + 现有 9 builder 改 schema 2.0（build_verification_card/build_daily_summary_card/build_phase_linking_card 等）+ 测试改新版结构
 - [ ] **PR-B**：补 5 个新 builder（build_plan_overview_card/build_schedule_card_a+b/build_daily_plan_card/build_task_complete_card/build_weekly_summary_card）+ 测试
-- [ ] **PR-C**：补 Service 推卡入口（PlanAppSvc.push_overview_card/ScheduleAppSvc.push_schedule_card/DailyAppSvc.push_daily_plan_card/WeeklyAppSvc.push_weekly_summary_card）+ story1_确认方案 + story2_下一步 webhook handler + feishu_card.py 取法修正（message_id 路径 + form_value + name 路由）
+- [ ] **PR-C**：补 Service 推卡入口（PlanAppSvc.push_overview_card/ScheduleAppSvc.push_schedule_card/DailyAppSvc.push_daily_plan_card/WeeklyAppSvc.push_weekly_summary_card）+ story1_确认方案 + story2_下一步 webhook handler + **feishu_card.py 取法修正（message_id 路径 payload["event"]["context"]["open_message_id"] 修正 FIX-1 错误取顶层 + form_value + name 路由）**
 - [ ] **PR-D**：全回调 update_card 补全（12 回调点击后刷新）+ form_value 处理（date_picker/checker/multi_select/input）+ delete_session 调用 + 测试
 
 合并顺序：PR-A -> PR-B -> PR-C -> PR-D（串行，依赖）。
