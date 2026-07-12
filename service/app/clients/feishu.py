@@ -559,6 +559,451 @@ def build_summary_reminder_card(date_str: str) -> dict:
     }
 
 
+def _executor_tag(executor: str) -> str:
+    """映射 executor 标识到飞书显示标签（doc/09 §S3/S4A）。
+
+    - ``human`` -> ``[人]``
+    - ``agent`` -> ``[智能体]``
+    - 已含方括号的（如 ``[人]``）原样返回
+    - 其余按 ``[{executor}]`` 包装
+    """
+    if executor.startswith("["):
+        return executor
+    return {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
+
+
+def build_plan_overview_card(
+    goal_name: str,
+    theme_count: int,
+    phase_count: int,
+    task_count: int,
+    draft_id: str,
+) -> dict:
+    """构建方案总览卡片-确认前（schema 2.0，doc/09 §S1 确认前）。
+
+    无 form，纯 markdown 概览 + 确认方案按钮（form 外 behaviors callback）。
+    回传 action_id=story1_确认方案 + draft_id。
+
+    :param goal_name: 目标名称
+    :param theme_count: 专题数
+    :param phase_count: 阶段数
+    :param task_count: 任务数
+    :param draft_id: 草稿 ID（确认按钮回传，Service 据此读 draft 落库）
+    """
+    content = (
+        f"**目标：{goal_name}**\n\n"
+        f"专题数：{theme_count}\n"
+        f"阶段数：{phase_count}\n"
+        f"任务数：{task_count}\n\n"
+        f"确认后将正式建库，可在 H5 页面调整。"
+    )
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "📋 方案总览"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": content},
+                {
+                    "tag": "button",
+                    "text": {"tag": "plain_text", "content": "确认方案"},
+                    "type": "primary",
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "action_id": "story1_确认方案",
+                                "draft_id": draft_id,
+                            },
+                        }
+                    ],
+                },
+            ]
+        },
+    }
+
+
+def build_schedule_card_a(
+    goal_name: str,
+    themes: list[dict],
+    h5_url: str = "",
+) -> dict:
+    """构建调度激活卡片 A-选专题（schema 2.0，doc/09 §S2 状态1）。
+
+    form + 每个专题一个 checker 勾选框 + 下一步按钮（form_submit，name=next_btn）。
+    用户勾选专题后 Service update_card 刷成卡片 B（填 deadline）。
+
+    :param goal_name: 目标名称
+    :param themes: 专题列表，每项含 ``theme_id``/``name``/``type``
+    :param h5_url: H5 配置页链接（可选，不传则纯文字提示）
+    """
+    form_elements: list[dict] = []
+    for t in themes:
+        form_elements.append(
+            {
+                "tag": "checker",
+                "name": f"theme_{t['theme_id']}",
+                "text": {"tag": "plain_text", "content": f"{t['name']}（{t['type']}）"},
+            }
+        )
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "next_btn",
+            "text": {"tag": "plain_text", "content": "下一步"},
+            "type": "primary",
+            "action_type": "form_submit",
+        }
+    )
+
+    elements: list[dict] = [
+        {"tag": "markdown", "content": f"**目标：{goal_name}**\n\n请勾选要激活的专题："},
+        {"tag": "form", "name": "schedule_form_a", "elements": form_elements},
+        {"tag": "hr"},
+    ]
+    if h5_url:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"默认全托管，调整 managed/path 请[前往配置页]({h5_url})",
+            }
+        )
+    else:
+        elements.append(
+            {"tag": "markdown", "content": "默认全托管，调整 managed/path 请前往配置页"}
+        )
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "🎯 调度激活"},
+            "template": "blue",
+        },
+        "body": {"elements": elements},
+    }
+
+
+def build_schedule_card_b(
+    goal_name: str,
+    phases: list[dict],
+) -> dict:
+    """构建调度激活卡片 B-填 deadline（schema 2.0，doc/09 §S2 状态2）。
+
+    form + 每个激活阶段一个 div（阶段名）+ date_picker + 确认调度按钮（form_submit，
+    name=confirm_btn）。patch 卡 A->B 是两态（A 选专题后 update_card 刷成 B）。
+
+    :param goal_name: 目标名称
+    :param phases: 激活阶段列表，每项含 ``theme_id``/``theme_name``/``phase_name``/``type``
+    """
+    form_elements: list[dict] = []
+    for p in phases:
+        form_elements.append(
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": f"· **{p['theme_name']} / {p['phase_name']}**（{p['type']}）",
+                },
+            }
+        )
+        form_elements.append(
+            {
+                "tag": "date_picker",
+                "name": f"dl_theme_{p['theme_id']}",
+                "required": True,
+                "placeholder": {"tag": "plain_text", "content": "选 deadline"},
+            }
+        )
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "confirm_btn",
+            "text": {"tag": "plain_text", "content": "确认调度"},
+            "type": "primary",
+            "action_type": "form_submit",
+        }
+    )
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "🎯 调度激活 - 填 deadline"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**目标：{goal_name}**\n\n以下阶段将被激活，请填 deadline：",
+                },
+                {"tag": "form", "name": "schedule_form_b", "elements": form_elements},
+            ]
+        },
+    }
+
+
+def build_daily_plan_card(
+    date_str: str,
+    candidate_tasks: list[dict],
+    prerequisites: list[dict],
+) -> dict:
+    """构建今日计划卡片（schema 2.0，doc/09 §S3 状态1）。
+
+    form + checker 两组：候选任务勾选（勾选=今日要做）+ 前置任务勾选（可取消）。
+    两组独立（铁律 §9 前置整体/与任务解耦）。确认今日计划按钮（form_submit，name=confirm_btn）。
+
+    :param date_str: 日期字符串（如 ``2026-07-10``）
+    :param candidate_tasks: 候选任务列表，每项含 ``task_id``/``name``/``executor``，
+        可选 ``phase_info``（如 ``知识获取/阶段1``，显示在任务名后的括号里）
+    :param prerequisites: 前置列表，每项含 ``subtask_id``/``name``
+    """
+    form_elements: list[dict] = []
+
+    # 候选任务 checker
+    for t in candidate_tasks:
+        executor_tag = _executor_tag(t["executor"])
+        phase_info = t.get("phase_info")
+        if phase_info:
+            text = f"{t['name']}（{phase_info}）{executor_tag}"
+        else:
+            text = f"{t['name']} {executor_tag}"
+        form_elements.append(
+            {
+                "tag": "checker",
+                "name": f"task_{t['task_id']}",
+                "text": {"tag": "plain_text", "content": text},
+            }
+        )
+
+    # 前置 checker（独立一组，与任务解耦，铁律 §9）
+    if prerequisites:
+        form_elements.append({"tag": "hr"})
+        form_elements.append({"tag": "markdown", "content": "**今日前置：**（可取消）"})
+        for p in prerequisites:
+            form_elements.append(
+                {
+                    "tag": "checker",
+                    "name": f"pre_{p['subtask_id']}",
+                    "text": {"tag": "plain_text", "content": p["name"]},
+                }
+            )
+
+    form_elements.append({"tag": "hr"})
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "confirm_btn",
+            "text": {"tag": "plain_text", "content": "确认今日计划"},
+            "type": "primary",
+            "action_type": "form_submit",
+        }
+    )
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": f"📋 今日计划（{date_str}）"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {"tag": "markdown", "content": "**候选任务：**（勾选今日要做的）"},
+                {"tag": "form", "name": "daily_plan_form", "elements": form_elements},
+            ]
+        },
+    }
+
+
+def build_task_complete_card(
+    workspace_name: str,
+    completed_tasks: list[dict],
+    pending_tasks: list[dict],
+) -> dict:
+    """构建确认完成任务卡片（schema 2.0，doc/09 §S4A 场景4，D26 新增）。
+
+    已完成任务：纯展示（div + lark_md，不可操作），显示执行主体 [人]/[智能体]。
+    待确认任务：checker 勾选确认完成（name=task_<id>），显示执行主体。
+    智能体任务可选"改交智能体重新执行"checker（name=task_<id>_reassign），文案带缩进箭头。
+    reassign 与 confirm 互斥（builder 只渲染两个 checker，互斥判定在 webhook/Service PR-D）。
+    确认完成按钮（form_submit，name=confirm_btn）。
+
+    :param workspace_name: 工作空间名称
+    :param completed_tasks: 已完成任务列表，每项含 ``name``/``executor``
+    :param pending_tasks: 待确认任务列表，每项含 ``id``/``name``/``executor``/``is_agent``
+    """
+    elements: list[dict] = [
+        {
+            "tag": "markdown",
+            "content": f"**工作空间：{workspace_name}**\n\n请确认以下任务的完成情况。",
+        },
+    ]
+
+    # 已完成任务（纯展示，div lark_md，不可操作）
+    elements.append({"tag": "markdown", "content": "**✅ 已完成任务：**"})
+    if completed_tasks:
+        for t in completed_tasks:
+            executor_tag = _executor_tag(t["executor"])
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {"tag": "lark_md", "content": f"· {t['name']} {executor_tag}"},
+                }
+            )
+    else:
+        elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "· （无）"}})
+
+    elements.append({"tag": "hr"})
+
+    # 待确认任务（checker 勾选）
+    elements.append({"tag": "markdown", "content": "**⏳ 待确认完成（勾选后点确认）：**"})
+
+    form_elements: list[dict] = []
+    for t in pending_tasks:
+        executor_tag = _executor_tag(t["executor"])
+        form_elements.append(
+            {
+                "tag": "checker",
+                "name": f"task_{t['id']}",
+                "text": {"tag": "plain_text", "content": f"{t['name']} {executor_tag}"},
+            }
+        )
+        # 智能体任务可选 reassign（doc/09 §S4A 实现注意：只对 is_agent 任务出现）
+        if t.get("is_agent"):
+            form_elements.append(
+                {
+                    "tag": "checker",
+                    "name": f"task_{t['id']}_reassign",
+                    "text": {
+                        "tag": "plain_text",
+                        "content": (
+                            "    ↑ 将此任务改交智能体重新执行（确认后 executor=智能体，重新下发）"
+                        ),
+                    },
+                }
+            )
+
+    form_elements.append({"tag": "hr"})
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "confirm_btn",
+            "text": {"tag": "plain_text", "content": "确认完成"},
+            "type": "primary",
+            "action_type": "form_submit",
+        }
+    )
+
+    elements.append({"tag": "form", "name": "confirm_complete_form", "elements": form_elements})
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "确认完成任务"},
+            "template": "blue",
+        },
+        "body": {"elements": elements},
+    }
+
+
+def build_weekly_summary_card(
+    week: str,
+    start_date: str,
+    end_date: str,
+    completed_tasks: list[dict],
+    daily_trends: list[dict],
+    phase_health: list[dict],
+    agent_output_count: int,
+    next_week_advice: str,
+) -> dict:
+    """构建周总结卡片（schema 2.0，doc/09 §S6 状态1）。
+
+    纯展示（无 form）+ 已阅按钮（form 外 behaviors callback，action_id=story6_已阅周总结）。
+    必须含本周完成任务列表（用户反馈：只有数字不够，要具体任务名+执行主体+日期）。
+    不含子任务统计（子任务不进周总结）。下周建议由 pm-summary LLM 生成（builder 不调 LLM）。
+
+    :param week: 周标识（如 ``2026-W28``）
+    :param start_date: 周开始日期
+    :param end_date: 周结束日期
+    :param completed_tasks: 本周完成任务列表，每项含 ``date``/``task_name``/``executor``
+    :param daily_trends: 每日完成趋势，每项含 ``date``/``weekday``/``completed``/``total``
+    :param phase_health: 阶段健康度，每项含 ``name``/``completed``/``total``/``status``
+    :param agent_output_count: 智能体产出文件数
+    :param next_week_advice: 下周建议（pm-summary LLM 生成，builder 不调 LLM）
+    """
+    elements: list[dict] = [
+        {"tag": "markdown", "content": f"**日期范围：** {start_date} ~ {end_date}"},
+        {"tag": "hr"},
+    ]
+
+    # 本周完成任务列表（必须含，用户反馈）
+    if completed_tasks:
+        task_lines = "\n".join(
+            f"· {t['date']} {t['task_name']} {_executor_tag(t['executor'])}"
+            for t in completed_tasks
+        )
+    else:
+        task_lines = "· （本周无完成任务）"
+    elements.append({"tag": "markdown", "content": f"**本周完成任务：**\n{task_lines}"})
+    elements.append({"tag": "hr"})
+
+    # 每日完成趋势
+    if daily_trends:
+        trend_lines = "\n".join(
+            f"· {d['date']} {d['weekday']}：{d['completed']}/{d['total']}" for d in daily_trends
+        )
+    else:
+        trend_lines = "· （无数据）"
+    elements.append({"tag": "markdown", "content": f"**每日完成趋势：**\n{trend_lines}"})
+    elements.append({"tag": "hr"})
+
+    # 阶段健康度
+    if phase_health:
+        health_lines = "\n".join(
+            f"· {p['name']}：{p['completed']}/{p['total']} {p['status']}" for p in phase_health
+        )
+    else:
+        health_lines = "· （无数据）"
+    elements.append({"tag": "markdown", "content": f"**阶段健康度：**\n{health_lines}"})
+    elements.append({"tag": "hr"})
+
+    # 智能体产出
+    elements.append({"tag": "markdown", "content": f"**智能体产出：** {agent_output_count} 个文件"})
+    elements.append({"tag": "hr"})
+
+    # 下周建议（LLM 生成，参数传入）
+    elements.append({"tag": "markdown", "content": f"**下周建议：** {next_week_advice}"})
+    elements.append({"tag": "hr"})
+
+    # 已阅按钮（form 外 behaviors callback）
+    elements.append(
+        {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "已阅"},
+            "type": "primary",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action_id": "story6_已阅周总结",
+                        "week": week,
+                    },
+                }
+            ],
+        }
+    )
+
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": f"📊 周总结（{week}）"},
+            "template": "blue",
+        },
+        "body": {"elements": elements},
+    }
+
+
 def _to_json_str(obj: dict) -> str:
     import json
 
