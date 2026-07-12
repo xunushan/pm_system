@@ -338,6 +338,9 @@ class ScheduleAppSvc:
                 return
             card = build_schedule_card_b(goal_name, phases)
             FeishuClient().update_card(message_id, card)
+            # 更新 card_registry 类型 schedule_a -> schedule_b
+            # 供 confirm_btn form_submit 回调区分（卡片 B 的确认调度 vs 其他 confirm_btn）
+            set_card_context(message_id, {"type": "schedule_b", "goal_id": goal_id})
         except Exception:
             logger.exception("patch_to_card_b_async 失败: message_id=%s", message_id)
         finally:

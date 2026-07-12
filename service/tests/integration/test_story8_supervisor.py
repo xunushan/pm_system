@@ -155,24 +155,29 @@ def test_activate_not_found(client, db_session):
 # ---- webhook story8 ----
 
 
-def test_webhook_story8_confirm_activate(client, db_session):
-    """story8_确认激活 -> 调度激活服务 + 即时级联。"""
+def test_webhook_story8_confirm_activate(client, db_session, monkeypatch):
+    """btn_activate (phase_linking) -> 调度激活服务 + 即时级联。
+
+    deadline 从 form_value.deadline 解析（date_picker，doc/09 V7）。
+    phase_id 靠 message_id 反查 card_registry（type=phase_linking）。
+    """
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
     phases[0].status = "已完成"
     goal.status = "进行中"
     themes[0].status = "进行中"
     db_session.flush()
 
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
+    )
+
     payload = {
         "event": {
             "context": {"open_message_id": "om_test"},
             "action": {
-                "value": {
-                    "action_id": "story8_确认激活",
-                    "phase_id": phases[1].id,
-                    "deadline": "2026-07-25",
-                    "user_id": "u1",
-                }
+                "name": "btn_activate",
+                "form_value": {"deadline": "2026-07-25 +0800"},
             },
         }
     }
@@ -185,21 +190,20 @@ def test_webhook_story8_confirm_activate(client, db_session):
     assert phases[1].status == "进行中"
 
 
-def test_webhook_story8_skip_activate(client, db_session):
-    """story8_暂不激活 -> no-op（不激活）。"""
+def test_webhook_story8_skip_activate(client, db_session, monkeypatch):
+    """btn_defer (phase_linking) -> no-op（不激活）。"""
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
     db_session.flush()
+
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
+    )
 
     payload = {
         "event": {
             "context": {"open_message_id": "om_test"},
-            "action": {
-                "value": {
-                    "action_id": "story8_暂不激活",
-                    "phase_id": phases[1].id,
-                    "user_id": "u1",
-                }
-            },
+            "action": {"name": "btn_defer", "form_value": {}},
         }
     }
     resp = client.post(_WEBHOOK, json=payload)

@@ -269,25 +269,25 @@ def test_subtask_get_not_found(client, db_session):
 # ===== webhook story4B =====
 
 
-def _card_value(action_id, task_id, post_subtasks=None):
-    """构造 schema 2.0 卡片回调 payload（doc/09 V2：event.action.value）。"""
+def _post_confirm_payload(message_id, form_value):
+    """构造 schema 2.0 form_submit 回调 payload（doc/09 V2）。"""
     return {
         "event": {
-            "context": {"open_message_id": "om_test"},
+            "context": {"open_message_id": message_id},
             "action": {
-                "value": {
-                    "action_id": action_id,
-                    "task_id": task_id,
-                    "user_id": "user_001",
-                    "post_subtasks": post_subtasks or [],
-                }
+                "name": "confirm_btn",
+                "form_value": form_value,
             },
         }
     }
 
 
 def test_webhook_post_confirm_inserts(client, db_session, monkeypatch):
-    """webhook story4B_确认后置 -> INSERT 后置 + 异步触发。"""
+    """webhook confirm_btn (post_confirm) -> INSERT 后置 + 异步触发。
+
+    form_value checker: post_<id>=true（勾选=要执行）。
+    后置名称从 card_registry context 查（form_value 只给 bool）。
+    """
     goal, themes, phases, task = _activate_and_get_task(db_session)
     task.status = "已完成"
     db_session.flush()
@@ -297,17 +297,23 @@ def test_webhook_post_confirm_inserts(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
+    # mock card_registry 反查 post_confirm 上下文
+    post_id = "post-001"
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {
+            "type": "post_confirm",
+            "task_id": task.id,
+            "post_subtasks": [{"id": post_id, "name": "笔记归档"}],
+        },
+    )
     dispatch_calls = []
     with patch.object(
         task_app_svc.OpenCodeClient,
         "dispatch_post_subtasks",
         side_effect=lambda subs: dispatch_calls.append(len(subs)),
     ):
-        payload = _card_value(
-            "story4B_确认后置",
-            task.id,
-            [{"name": "笔记归档", "type": "后置"}],
-        )
+        payload = _post_confirm_payload("om_test", {f"post_{post_id}": True})
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
@@ -318,13 +324,23 @@ def test_webhook_post_confirm_inserts(client, db_session, monkeypatch):
     assert len(dispatch_calls) == 1
 
 
-def test_webhook_no_post_all_cancelled(client, db_session):
-    """webhook story4B_不需要后置 -> 全取消，不插入后置。"""
+def test_webhook_no_post_all_cancelled(client, db_session, monkeypatch):
+    """webhook confirm_btn (post_confirm) 全不选 -> 全取消，不插入后置。"""
     goal, themes, phases, task = _activate_and_get_task(db_session)
     task.status = "已完成"
     db_session.flush()
 
-    payload = _card_value("story4B_不需要后置", task.id, [])
+    post_id = "post-001"
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {
+            "type": "post_confirm",
+            "task_id": task.id,
+            "post_subtasks": [{"id": post_id, "name": "笔记归档"}],
+        },
+    )
+    # form_value: post_<id>=false（全不选）
+    payload = _post_confirm_payload("om_test", {f"post_{post_id}": False})
     resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200
@@ -334,10 +350,19 @@ def test_webhook_no_post_all_cancelled(client, db_session):
     assert db_session.query(Subtask).filter_by(task_id=task.id).count() == 0
 
 
-def test_webhook_post_confirm_task_not_completed(client, db_session):
-    """webhook story4B 但 task 未完成 -> 400。"""
+def test_webhook_post_confirm_task_not_completed(client, db_session, monkeypatch):
+    """webhook confirm_btn (post_confirm) 但 task 未完成 -> 400。"""
     goal, themes, phases, task = _activate_and_get_task(db_session)
-    payload = _card_value("story4B_确认后置", task.id, [{"name": "x", "type": "后置"}])
+
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {
+            "type": "post_confirm",
+            "task_id": task.id,
+            "post_subtasks": [],
+        },
+    )
+    payload = _post_confirm_payload("om_test", {})
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 400
     assert resp.json()["code"] == 1002

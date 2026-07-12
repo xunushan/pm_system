@@ -17,7 +17,7 @@ from app.models.daily_record import DailyRecord
 from app.models.daily_task import DailyTask
 from app.models.status_change_log import StatusChangeLog
 from app.models.task import Task
-from app.services import daily_app_svc, task_app_svc
+from app.services import daily_app_svc
 from tests._factory import make_tree
 
 _API = "/api/v1"
@@ -367,41 +367,55 @@ def _card_value(action_id, message_id="om_test", **kwargs):
     }
 
 
+def _daily_summary_payload(message_id, form_value):
+    """构造 schema 2.0 form_submit 回调 payload（confirm_btn, daily_summary）。"""
+    return {
+        "event": {
+            "context": {"open_message_id": message_id},
+            "action": {
+                "name": "confirm_btn",
+                "form_value": form_value,
+            },
+        }
+    }
+
+
 def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
-    """webhook story5_标记完成 -> PATCH forward + 异步刷卡片（message_id fallback）。"""
+    """webhook confirm_btn (daily_summary) 勾选未完成任务 -> PATCH forward。
+
+    doc/09 §S5：checker 勾选=已完成，对比初始 checked 状态反转变化的任务。
+    初始状态 = DB task.status（card 从 DB 构建）。未完成 -> 勾选 -> forward。
+    """
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=0
     )
 
     monkeypatch.setattr(
-        task_app_svc,
+        daily_app_svc,
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
-    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
-        payload = _card_value(
-            "story5_标记完成",
-            task_id=tasks[0].id,
-            message_id="msg_001",
-            daily_id=daily.id,
-        )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
+    with patch.object(daily_app_svc, "write_daily_md"):
+        payload = _daily_summary_payload("msg_001", {f"task_{tasks[0].id}": True})
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["status"] == "已完成"
 
     db_session.flush()
     assert tasks[0].status == "已完成"
-
-    # FIX-1 回归：update_card 收到正确的 message_id（fallback 自 action.value）
-    mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == "msg_001"
+    assert daily.is_confirmed is True
 
 
 def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
-    """webhook story5_标记未完成 -> PATCH revert + 异步刷卡片（message_id fallback）。"""
+    """webhook confirm_btn (daily_summary) 取消已完成任务 -> PATCH revert。
+
+    初始状态 = DB task.status（已完成 -> checked）。取消勾选 -> revert。
+    """
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=1
     )
@@ -412,103 +426,55 @@ def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
     db_session.flush()
 
     monkeypatch.setattr(
-        task_app_svc,
+        daily_app_svc,
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
-    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
-        payload = _card_value(
-            "story5_标记未完成",
-            task_id=tasks[0].id,
-            message_id="msg_001",
-            daily_id=daily.id,
-        )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
+    with patch.object(daily_app_svc, "write_daily_md"):
+        payload = _daily_summary_payload("msg_001", {f"task_{tasks[0].id}": False})
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["status"] == "待执行"
 
     db_session.flush()
     assert tasks[0].status == "待执行"
     assert phases[0].status == "进行中"
-
-    # FIX-1 回归：update_card 收到正确的 message_id（fallback 自 action.value）
-    mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == "msg_001"
+    assert daily.is_confirmed is True
 
 
-def test_webhook_story5_message_id_from_event_context(client, db_session, monkeypatch):
-    """doc/09 V2: message_id 从 event.context.open_message_id 取（修正 FIX-1 错误取顶层）。
-
-    schema 2.0 回调结构：message_id 在 payload["event"]["context"]["open_message_id"]，
-    不在 payload 顶层（FIX-1 旧取法错误）。handler 从 event.context 取后传给
-    update_card，刷新被点击的卡片。
-    """
+def test_webhook_story5_no_change_no_patch(client, db_session, monkeypatch):
+    """webhook confirm_btn (daily_summary) 勾选状态与 DB 一致 -> 不调 patch_status。"""
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
-        db_session, tasks_per_phase=1, completed_count=0
+        db_session, tasks_per_phase=1, completed_count=1
     )
+    db_session.flush()
 
     monkeypatch.setattr(
-        task_app_svc,
+        daily_app_svc,
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
-    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
-        payload = _card_value(
-            "story5_标记完成",
-            message_id="om_event_ctx",
-            task_id=tasks[0].id,
-            daily_id=daily.id,
-        )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
+    with patch.object(daily_app_svc, "write_daily_md"):
+        # 已完成任务勾选 true = 状态一致，不调 patch_status
+        payload = _daily_summary_payload("msg_001", {f"task_{tasks[0].id}": True})
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["code"] == 0
-
-    # update_card 被调用且 message_id 来自 event.context.open_message_id
-    mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == "om_event_ctx"
-
-
-def test_webhook_story5_message_id_missing_context(client, db_session, monkeypatch):
-    """doc/09 V2: event.context.open_message_id 缺失时 message_id 为空串（容错）。
-
-    schema 2.0 回调结构只有一个 message_id 路径（event.context.open_message_id）。
-    若 context 无此字段，handler 传空串给 update_card（不崩，但刷新无效）。
-    """
-    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
-        db_session, tasks_per_phase=1, completed_count=0
-    )
-
-    monkeypatch.setattr(
-        task_app_svc,
-        "SessionLocal",
-        sessionmaker(bind=db_session.bind, expire_on_commit=False),
-    )
-    with patch.object(task_app_svc.FeishuClient, "update_card") as mock_update:
-        payload = {
-            "event": {
-                "context": {},  # 无 open_message_id
-                "action": {
-                    "value": {
-                        "action_id": "story5_标记完成",
-                        "task_id": tasks[0].id,
-                        "daily_id": daily.id,
-                    }
-                },
-            }
-        }
-        resp = client.post(_WEBHOOK, json=payload)
-
-    assert resp.status_code == 200, resp.text
-    mock_update.assert_called_once()
-    assert mock_update.call_args[0][0] == ""
+    assert daily.is_confirmed is True
 
 
 def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
-    """webhook story5_确认日终总结 -> 置 is_confirmed + 异步写 daily.md。"""
+    """webhook confirm_btn (daily_summary) -> 置 is_confirmed + 异步写 daily.md。"""
     goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
         db_session, tasks_per_phase=1, completed_count=0
     )
@@ -518,8 +484,12 @@ def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
         "SessionLocal",
         sessionmaker(bind=db_session.bind, expire_on_commit=False),
     )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
     with patch.object(daily_app_svc, "write_daily_md"):
-        payload = _card_value("story5_确认日终总结", daily_id=daily.id)
+        payload = _daily_summary_payload("om_test", {f"task_{tasks[0].id}": False})
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
@@ -531,17 +501,13 @@ def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
     assert daily.is_confirmed is True
 
 
-def test_webhook_story5_missing_task_id(client, db_session):
-    """webhook story5_标记完成 缺 task_id -> 400。"""
-    payload = _card_value("story5_标记完成", message_id="msg_001")
-    resp = client.post(_WEBHOOK, json=payload)
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 1002
-
-
-def test_webhook_story5_confirm_missing_daily_id(client, db_session):
-    """webhook story5_确认日终总结 缺 daily_id -> 400。"""
-    payload = _card_value("story5_确认日终总结")
+def test_webhook_story5_no_card_context(client, db_session, monkeypatch):
+    """card_registry 反查 None -> 1002（容错，不崩）。"""
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: None,
+    )
+    payload = _daily_summary_payload("om_test", {})
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     assert resp.json()["code"] == 1002

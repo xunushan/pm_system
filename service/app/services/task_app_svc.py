@@ -36,6 +36,7 @@ from sqlalchemy.orm import Session
 from app.clients.feishu import FeishuClient, build_daily_summary_card, build_verification_card
 from app.clients.opencode import OpenCodeClient
 from app.core import audit, cascade, state_machine
+from app.core.card_registry import set_card_context
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
 from app.core.task_timeout import del_task_timeout, set_task_timeout
 from app.core.times import now_utc_naive
@@ -457,6 +458,36 @@ class TaskAppSvc:
             next_agent_task=next_agent_task.id if next_agent_task else None,
         )
 
+    # ---- S4A 场景4 reassign（改交智能体重新执行，D26）----
+
+    def reassign_to_agent(self, task_id: str, user_id: str = "feishu_user") -> dict:
+        """改交智能体重新执行（D26）：改 executor=agent + 重新下发。
+
+        doc/09 §S4A 场景4 实现注意：reassign checker 勾选后，该 task 不走确认完成，
+        而是改 executor=agent + 重新下发（铁律8 executor 可改，D26）。
+
+        事务内：UPDATE task.executor='agent' + COMMIT（<200ms）
+        事务后：start_agent_serve 重新下发（IO，与 confirm_complete 的 _restart_opencode 同模式）。
+        """
+        task = self.task_repo.get(task_id)
+        if task is None:
+            raise NotFoundError(f"任务不存在: {task_id}")
+
+        task.executor = "agent"
+        self.db.commit()
+
+        # 事务后：重新下发（与 confirm_complete._restart_opencode 同模式，同步调用）
+        workspace_id = self._get_workspace_id_for_task(task)
+        if workspace_id:
+            task_dict = {
+                "task_id": task.id,
+                "name": task.name,
+                "phase_id": task.phase_id,
+            }
+            self.opencode.start_agent_serve(workspace_id, task_dict)
+
+        return {"task_id": task_id, "executor": "agent", "reassigned": True}
+
     # ---- POST /tasks/{taskId}/output/confirm (Story4A) ----
 
     def output_confirm(
@@ -826,7 +857,11 @@ class TaskAppSvc:
         # 发验收卡片
         try:
             card = build_verification_card(task_id, task_name, file_paths)
-            self.feishu.send_card(DEFAULT_CHAT_ID, card)
+            message_id = self.feishu.send_card(DEFAULT_CHAT_ID, card)
+            # 存 Redis 映射：message_id -> {type:verification, task_id}
+            # 供 btn_pass/btn_reject form_submit 回调反查 task_id（P2 路由缺口落地）
+            if message_id:
+                set_card_context(message_id, {"type": "verification", "task_id": task_id})
         except Exception:
             logger.exception("发送验收卡片失败: task=%s", task_id)
 

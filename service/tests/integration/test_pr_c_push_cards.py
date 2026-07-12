@@ -124,7 +124,9 @@ def test_push_daily_plan_card(db_session, fake_redis_card):
     assert form["tag"] == "form"
     assert form["name"] == "daily_plan_form"
     ctx = get_card_context("om_daily", redis_client=fake_redis_card)
-    assert ctx == {"type": "daily_plan"}
+    assert ctx["type"] == "daily_plan"
+    assert ctx["date"] == "2026-07-10"
+    assert ctx["prerequisites"] == [{"id": "s1", "name": "前置1"}]
 
 
 # ===== WeeklyAppSvc.push_weekly_summary_card =====
