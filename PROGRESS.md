@@ -68,7 +68,8 @@
 - [x] S4B 真测通过（数据层：board API 改 executor=human + PATCH 完成 + push_post_confirm_card 推后置卡；全选/全不选 toggle 方案B立即刷新；confirm_btn 后置 2 行落库（可全取消铁律§9）。**前置约束：post_confirm 要求 executor=human，e2e 跳过 Skill 需先用 board API 填 executor**）
 - [x] S5 真测通过（数据层：GET /daily/summary/generate 统计 + push_daily_summary_card 推日终卡 + webhook confirm_btn daily_summary 反转 checker + is_confirmed=1 + daily.md 写入；**重复点击幂等**返回方案B绿卡，不再 409）
 - [x] S6 真测通过（数据层：push_weekly_summary_card_from_db 服务自汇总日->周（按 tasks.completed_at 聚合）+ webhook story6_已阅周总结 confirm_summary 幂等 + write_weekly_md；DB 核对 4 类数据相符：本周完成 3 任务/4 阶段健康度/每日趋势/智能体产出 2 文件）
-- [ ] S7 -> S9 逐项真测（真实推卡 + 真实点击 + 禁止改 DB + 真实 opencode，按 doc/09 样式验证）
+- [x] S8 真测通过（多阶段目标：1主题×2阶段×4任务经真实 API 规划+确认+激活+完成第1阶段 -> cascade emit phase_completed -> dispatcher 自动推衔接卡 -> 用户点 btn_activate 激活第2阶段。DB 核对：第2阶段 未开始->进行中 + deadline 落库 + workspace 已就绪。全链路零 mock）
+- [ ] S7/S9 无飞书卡片（H5 配置/看板），e2e 不测，有飞书卡片的故事已全部真测通过
 
 #### e2e 发现的缺陷（待修）
 - ~~**[P1] 卡片回调后按钮长时间可点击**~~ ✅ 已修（PR #31 合并 de64828）。方案 B：webhook 同步在响应体返回终态卡片 `{"toast","card":{"type":"raw","data":<schema2.0>}}`，飞书立即更新（实测 S1 点击后立即变绿）。飞书官方「方式一：3秒内立即更新卡片」。耗时副作用仍异步。623 测试绿 + CI 绿 + code-reviewer 建议合并。
