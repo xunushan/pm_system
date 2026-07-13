@@ -13,7 +13,7 @@ Story4A 方法：
   - output_reject：退回智能体产出，重试或通知。3 次不通过不改状态。
   - record_output：OpenCode 产出回调 -> 记录 workspace_progress + DEL 超时 + 发验收卡片。
   - handle_timeout：Redis 超时告警回调 -> 飞书通知。
-  - trigger_reject_async：output_reject 事务后异步触发（dispatch/shutdown/通知）。
+  - trigger_reject_async：output_reject 事务后异步触发（dispatch/delete_session/通知）。
 
 铁律（CLAUDE.md §3）：
   - Service 不调 LLM（§3#1）：complete/confirm 只标记完成+级联；
@@ -33,7 +33,14 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_daily_summary_card, build_verification_card
+from app.clients.feishu import (
+    FeishuClient,
+    build_daily_summary_card,
+    build_done_card,
+    build_post_confirm_card,
+    build_task_complete_card,
+    build_verification_card,
+)
 from app.clients.opencode import OpenCodeClient
 from app.core import audit, cascade, state_machine
 from app.core.card_registry import set_card_context
@@ -461,13 +468,14 @@ class TaskAppSvc:
     # ---- S4A 场景4 reassign（改交智能体重新执行，D26）----
 
     def reassign_to_agent(self, task_id: str, user_id: str = "feishu_user") -> dict:
-        """改交智能体重新执行（D26）：改 executor=agent + 重新下发。
+        """改交智能体重新执行（D26）：改 executor=agent + COMMIT（仅事务）。
 
         doc/09 §S4A 场景4 实现注意：reassign checker 勾选后，该 task 不走确认完成，
         而是改 executor=agent + 重新下发（铁律8 executor 可改，D26）。
 
-        事务内：UPDATE task.executor='agent' + COMMIT（<200ms）
-        事务后：start_agent_serve 重新下发（IO，与 confirm_complete 的 _restart_opencode 同模式）。
+        事务内：UPDATE task.executor='agent' + COMMIT（<200ms）。
+        事务后异步：start_agent_serve 重新下发（IO，由路由层 BackgroundTasks 调
+        reassign_to_agent_async，与 confirm_complete._restart_opencode 同模式，铁律 §3#3/#4）。
         """
         task = self.task_repo.get(task_id)
         if task is None:
@@ -476,17 +484,32 @@ class TaskAppSvc:
         task.executor = "agent"
         self.db.commit()
 
-        # 事务后：重新下发（与 confirm_complete._restart_opencode 同模式，同步调用）
-        workspace_id = self._get_workspace_id_for_task(task)
-        if workspace_id:
-            task_dict = {
-                "task_id": task.id,
-                "name": task.name,
-                "phase_id": task.phase_id,
-            }
-            self.opencode.start_agent_serve(workspace_id, task_dict)
-
         return {"task_id": task_id, "executor": "agent", "reassigned": True}
+
+    @staticmethod
+    def reassign_to_agent_async(task_id: str) -> None:
+        """事务后异步：改交智能体重新下发（独立 session，BackgroundTasks 调用）。
+
+        与 confirm_complete._restart_opencode 同模式，IO 操作事务后异步（铁律 §3#3/#4）。
+        """
+        db = SessionLocal()
+        try:
+            svc = TaskAppSvc(db)
+            task = svc.task_repo.get(task_id)
+            if task is None:
+                return
+            workspace_id = svc._get_workspace_id_for_task(task)
+            if workspace_id:
+                task_dict = {
+                    "task_id": task.id,
+                    "name": task.name,
+                    "phase_id": task.phase_id,
+                }
+                svc.opencode.start_agent_serve(workspace_id, task_dict)
+        except Exception:
+            logger.exception("reassign_to_agent_async 失败: task=%s", task_id)
+        finally:
+            db.close()
 
     # ---- POST /tasks/{taskId}/output/confirm (Story4A) ----
 
@@ -557,7 +580,7 @@ class TaskAppSvc:
         事务内（铁律 §3#3/#4）：仅更新 retry_count + COMMIT。
         事务后异步（由路由层 BackgroundTasks 调 trigger_reject_async）：
           - retry 路径：dispatch_task + 重设 Redis 超时
-          - manual_intervention 路径：opencode shutdown + 飞书通知
+          - manual_intervention 路径：opencode delete_session + 飞书通知
 
         逻辑（doc/04 行654, doc/06 步骤8）：
           - retry_count < 3：retry_count+=1 -> action='retry'
@@ -613,13 +636,15 @@ class TaskAppSvc:
                 svc = TaskAppSvc(db)
                 svc._retry_dispatch(task, feedback)
             else:
-                # manual_intervention 路径：shutdown + 飞书通知
+                # manual_intervention 路径：delete_session（退 session，D26 步骤8）+ 飞书通知
+                # shutdown 只标 stopped，delete_session 真退 session（DELETE /session/:id，
+                # 全局 serve 保留）。3 次不通过退 session，用户可用 session_id 接管。
                 svc = TaskAppSvc(db)
                 workspace = svc._get_workspace_for_task(task)
                 workspace_path = workspace.path if workspace else None
                 workspace_id = svc._get_workspace_id_for_task(task)
                 if workspace_id:
-                    svc.opencode.shutdown(workspace_id)
+                    svc.opencode.delete_session(workspace_id)
                 try:
                     svc.feishu.send_text(
                         DEFAULT_CHAT_ID,
@@ -871,6 +896,232 @@ class TaskAppSvc:
                 self.feishu.send_file(DEFAULT_CHAT_ID, fp)
             except Exception:
                 logger.exception("发送产出文件失败: %s", fp)
+
+    # ---- 推卡入口（schema 2.0，doc/09 §S4A 场景4 / §S4B）----
+
+    def push_task_complete_card(
+        self,
+        workspace_id: str,
+        workspace_name: str,
+        completed_tasks: list[dict],
+        pending_tasks: list[dict],
+        chat_id: str,
+    ) -> str | None:
+        """推确认完成任务卡片（schema 2.0，doc/09 §S4A 场景4，D26）。
+
+        触发时机：用户发 /pm 确认完成（Skill 调 Service 推卡）。
+        send_card 返回 message_id 后存 Redis 映射 ->
+        {type:"task_complete", workspace_id}，供 confirm_btn form_submit 回调反查
+        （P2 路由缺口落地，doc/09 §S4A 场景4）。
+
+        :param workspace_id: 工作空间 ID
+        :param workspace_name: 工作空间名称
+        :param completed_tasks: 已完成任务列表，每项含 ``name``/``executor``
+        :param pending_tasks: 待确认任务列表，每项含 ``id``/``name``/``executor``/``is_agent``
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_task_complete_card(workspace_name, completed_tasks, pending_tasks)
+        message_id = self.feishu.send_card(chat_id, card)
+        if message_id:
+            set_card_context(message_id, {"type": "task_complete", "workspace_id": workspace_id})
+        return message_id
+
+    def push_post_confirm_card(
+        self,
+        task_id: str,
+        task_name: str,
+        post_subtasks: list[dict],
+        chat_id: str,
+    ) -> str | None:
+        """推后置确认卡片（schema 2.0，doc/09 §S4B 状态1）。
+
+        触发时机：任务完成待确认后置（doc/09 §S4B）。
+        send_card 返回 message_id 后存 Redis 映射 ->
+        {type:"post_confirm", task_id, post_subtasks}，供 confirm_btn form_submit
+        回调反查 task_id + 后置名称（form_value 只给 bool，名称从 context 查）。
+
+        :param task_id: 任务 ID
+        :param task_name: 任务名称
+        :param post_subtasks: 后置列表，每项含 ``id``/``name``
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_post_confirm_card(task_name, task_id, post_subtasks)
+        message_id = self.feishu.send_card(chat_id, card)
+        if message_id:
+            set_card_context(
+                message_id,
+                {
+                    "type": "post_confirm",
+                    "task_id": task_id,
+                    "post_subtasks": post_subtasks,
+                },
+            )
+        return message_id
+
+    # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
+
+    @staticmethod
+    def refresh_verification_done_async(
+        message_id: str, task_id: str, passed: bool, feedback: str = ""
+    ) -> None:
+        """事务后异步刷新验收卡到终态（独立 session，BackgroundTasks 调用）。
+
+        - passed=True -> §S4A 场景1 验收通过：绿色，"✅ 验收通过，任务已完成"
+        - passed=False -> §S4A 场景2 反馈已下发：橙色，"✅ 反馈已下发智能体"
+
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            task_name = task.name if task else task_id
+            file_paths = [
+                wp.file_path
+                for wp in db.execute(
+                    select(WorkspaceProgress.file_path).where(WorkspaceProgress.task_id == task_id)
+                ).all()
+            ]
+            file_list = "\n".join(f"· {fp}" for fp in file_paths) or "（无产出文件）"
+
+            if passed:
+                elements = [
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            f"**任务：{task_name}**\n\n"
+                            "✅ **验收通过，任务已完成**\n\n"
+                            f"**产出文件：**\n{file_list}"
+                        ),
+                    }
+                ]
+                card = build_done_card("✅ 验收通过", "green", elements)
+            else:
+                elements = [
+                    {
+                        "tag": "markdown",
+                        "content": (
+                            f"**任务：{task_name}**\n\n"
+                            "✅ **你的反馈已下发智能体，等待其调整产出**\n\n"
+                            f"**你的反馈：**\n> {feedback}\n\n"
+                            f"产出文件：\n{file_list}"
+                        ),
+                    }
+                ]
+                card = build_done_card("⚠️ 反馈已下发", "orange", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_verification_done_async 失败: task=%s", task_id)
+        finally:
+            db.close()
+
+    @staticmethod
+    def refresh_post_confirm_done_async(message_id: str, task_id: str, has_post: bool) -> None:
+        """事务后异步刷新后置确认卡到终态（独立 session，BackgroundTasks 调用）。
+
+        - has_post=True -> §S4B 有后置：绿色，"后置工作已启动，完成后通知你"
+        - has_post=False -> §S4B 无后置（全不选）：绿色，"无后置子任务执行"
+
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            task_name = task.name if task else task_id
+            if has_post:
+                content = (
+                    f"**任务：{task_name}**\n\n✅ **后置已确认**\n\n后置工作已启动，完成后通知你。"
+                )
+            else:
+                content = (
+                    f"**任务：{task_name}**\n\n"
+                    "✅ **后置已确认（无后置收尾）**\n\n"
+                    "任务保持已完成状态，无后置子任务执行。"
+                )
+            elements = [{"tag": "markdown", "content": content}]
+            card = build_done_card("✅ 任务已完成", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_post_confirm_done_async 失败: task=%s", task_id)
+        finally:
+            db.close()
+
+    @staticmethod
+    def refresh_post_confirm_toggle_async(
+        message_id: str, task_id: str, post_subtasks: list[dict], select_all: bool
+    ) -> None:
+        """事务后异步刷新后置确认卡（全选/全不选切换，doc/09 §S4B）。
+
+        全选/全不选按钮是 form 外按钮（behaviors callback），点击不提交 form，
+        Service 收到回调后重建 build_post_confirm_card（select_all=True/False）-> update_card
+        刷新所有 checker 的 checked 状态（保留按钮，doc/09 §S4B"用户点全不选后"）。
+
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+
+        :param post_subtasks: 后置列表 [{id, name}, ...]（从 card_registry context 查）
+        :param select_all: True=全选（checked=true），False=全不选（checked=false）
+        """
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            task_name = task.name if task else task_id
+            card = build_post_confirm_card(task_name, task_id, post_subtasks, select_all)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_post_confirm_toggle_async 失败: task=%s", task_id)
+        finally:
+            db.close()
+
+    @staticmethod
+    def refresh_task_complete_done_async(
+        message_id: str, workspace_id: str, results: list[dict]
+    ) -> None:
+        """事务后异步刷新确认完成卡到终态（独立 session，BackgroundTasks 调用）。
+
+        §S4A 场景4 点确认完成后：绿色，"✅ 确认完成已提交" + 完成任务列表。
+
+        :param results: [{"task_id": "...", "action": "completed"/"reassigned"}, ...]
+
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            ws = db.get(Workspace, workspace_id)
+            workspace_name = ws.path if ws else workspace_id
+            completed_lines = []
+            has_reassign = False
+            for r in results:
+                task = db.get(Task, r["task_id"])
+                task_name = task.name if task else r["task_id"]
+                executor = task.executor if task else "?"
+                tag = {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
+                if r["action"] == "reassigned":
+                    has_reassign = True
+                completed_lines.append(f"· {task_name} {tag} - 已完成")
+            task_list = "\n".join(completed_lines) or "· （无）"
+
+            reassign_note = ""
+            if has_reassign:
+                reassign_note = "\n\n已重新下发改交智能体的任务。"
+
+            elements = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"✅ **确认完成已提交**\n\n"
+                        f"**工作空间：{workspace_name}**\n\n"
+                        f"**本批确认完成的任务：**"
+                    ),
+                },
+                {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
+                {"tag": "hr"},
+                {"tag": "markdown", "content": f"系统已记录。{reassign_note}"},
+            ]
+            card = build_done_card("确认完成已提交", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_task_complete_done_async 失败: ws=%s", workspace_id)
+        finally:
+            db.close()
 
     # ---- 转换辅助（Story4B）----
 

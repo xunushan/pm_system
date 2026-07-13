@@ -1004,6 +1004,131 @@ def build_weekly_summary_card(
     }
 
 
+def build_post_confirm_card(
+    task_name: str,
+    task_id: str,
+    post_subtasks: list[dict],
+    select_all: bool | None = None,
+) -> dict:
+    """构建后置确认卡片（schema 2.0，doc/09 §S4B 状态1）。
+
+    卡片内容：任务名 + form（checker 后置勾选，默认全选 checked=true）+
+    全选/全不选小按钮（form 外 behaviors callback，点了 Service update_card 刷新 checker）+
+    确认按钮（form_submit，name=confirm_btn）。
+
+    :param task_name: 任务名称
+    :param task_id: 任务 ID（全选/全不选按钮回传）
+    :param post_subtasks: 后置列表，每项含 ``id``/``name``
+    :param select_all: 全选/全不选切换。None=默认全选（初始推送），
+        True=全选（update_card 刷新），False=全不选（update_card 刷新）。
+        用于全选/全不选按钮点击后 Service 重建卡片刷新 checker 状态（doc/09 §S4B）。
+    """
+    form_elements: list[dict] = []
+    # select_all=None -> 默认全选（初始推送）；True/False -> 切换后重建（update_card 刷新）
+    checked = True if select_all is None else select_all
+    for p in post_subtasks:
+        form_elements.append(
+            {
+                "tag": "checker",
+                "name": f"post_{p['id']}",
+                "text": {"tag": "plain_text", "content": p["name"]},
+                "checked": checked,
+            }
+        )
+    form_elements.append({"tag": "hr"})
+    form_elements.append(
+        {
+            "tag": "column_set",
+            "columns": [
+                {
+                    "tag": "column",
+                    "width": "auto",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "name": "btn_select_all",
+                            "text": {"tag": "plain_text", "content": "全选"},
+                            "type": "default",
+                            "size": "small",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {"action_id": "story4B_全选", "task_id": task_id},
+                                }
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "tag": "column",
+                    "width": "auto",
+                    "elements": [
+                        {
+                            "tag": "button",
+                            "name": "btn_unselect_all",
+                            "text": {"tag": "plain_text", "content": "全不选"},
+                            "type": "default",
+                            "size": "small",
+                            "behaviors": [
+                                {
+                                    "type": "callback",
+                                    "value": {"action_id": "story4B_全不选", "task_id": task_id},
+                                }
+                            ],
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+    form_elements.append(
+        {
+            "tag": "button",
+            "name": "confirm_btn",
+            "text": {"tag": "plain_text", "content": "确认"},
+            "type": "primary",
+            "action_type": "form_submit",
+        }
+    )
+    return {
+        "schema": "2.0",
+        "header": {
+            "title": {"tag": "plain_text", "content": "✅ 任务已完成"},
+            "template": "blue",
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**任务：{task_name}**\n\n"
+                        "任务已完成。请确认后置收尾项（取消不需要的，可全取消）："
+                    ),
+                },
+                {"tag": "form", "name": "post_confirm_form", "elements": form_elements},
+            ]
+        },
+    }
+
+
+def build_done_card(title: str, template: str, elements: list[dict]) -> dict:
+    """构建终态卡片（schema 2.0，无按钮展示卡，doc/09 各 Story 终态）。
+
+    用于 update_card 刷新：回调业务执行后，重建终态卡刷新原卡片。
+    飞书不自动置灰/移除按钮，Service 收回调后必须 update_card（doc/09 §通用规则）。
+    终态卡 = 去掉按钮 + 标题转色（green=已完成 / orange=暂缓）+ 确认文案。
+
+    :param title: 卡片标题
+    :param template: 标题颜色（green/orange/blue/red）
+    :param elements: body 元素列表（markdown/div/hr 等，由调用方构造）
+    """
+    return {
+        "schema": "2.0",
+        "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
+        "body": {"elements": elements},
+    }
+
+
 def _to_json_str(obj: dict) -> str:
     import json
 

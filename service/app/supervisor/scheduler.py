@@ -31,6 +31,7 @@ from app.clients.feishu import (
     build_summary_reminder_card,
 )
 from app.config import settings
+from app.core.card_registry import set_card_context
 from app.core.redis_client import get_redis
 from app.core.times import now_utc_naive, parse_iso_naive
 from app.db.session import SessionLocal
@@ -273,7 +274,9 @@ def check_linking_unresponded(
             suggested_deadline=deadline_str,
         )
         try:
-            feishu.send_card(DEFAULT_CHAT_ID, card)
+            message_id = feishu.send_card(DEFAULT_CHAT_ID, card)
+            if message_id:
+                set_card_context(message_id, {"type": "phase_linking", "phase_id": next_phase.id})
             _mark_notified(redis_client, "linking_unresp", phase.id, today)
             # 更新推送时间
             redis_client.set(key, now.isoformat(), ex=86400 * 2)

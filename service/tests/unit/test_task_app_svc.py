@@ -577,7 +577,7 @@ def test_output_reject_at_limit_manual_intervention(db_session):
     db_session.flush()
 
     with (
-        patch.object(task_app_svc.OpenCodeClient, "shutdown", return_value=True),
+        patch.object(task_app_svc.OpenCodeClient, "delete_session", return_value=True),
         patch.object(task_app_svc.FeishuClient, "send_text"),
     ):
         svc = task_app_svc.TaskAppSvc(db_session)
@@ -677,7 +677,7 @@ def test_trigger_reject_async_retry_path(db_session, monkeypatch):
 
 
 def test_trigger_reject_async_manual_intervention_path(db_session, monkeypatch):
-    """trigger_reject_async manual_intervention 路径：shutdown + 飞书通知在后台执行。"""
+    """trigger_reject_async manual_intervention 路径：delete_session + 飞书通知在后台执行。"""
     from sqlalchemy.orm import sessionmaker
 
     goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
@@ -692,12 +692,14 @@ def test_trigger_reject_async_manual_intervention_path(db_session, monkeypatch):
     )
 
     with (
-        patch.object(task_app_svc.OpenCodeClient, "shutdown", return_value=True) as mock_shutdown,
+        patch.object(
+            task_app_svc.OpenCodeClient, "delete_session", return_value=True
+        ) as mock_delete,
         patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
     ):
         task_app_svc.TaskAppSvc.trigger_reject_async(task.id, "多次不过")
 
-    mock_shutdown.assert_called_once()
+    mock_delete.assert_called_once()
     mock_send.assert_called_once()
 
 
@@ -729,7 +731,7 @@ def test_output_reject_no_sync_http_in_retry(db_session, monkeypatch):
 
 
 def test_output_reject_no_sync_http_in_manual_intervention(db_session, monkeypatch):
-    """output_reject manual_intervention 路径不同步调 shutdown/send_text。"""
+    """output_reject manual_intervention 路径不同步调 delete_session/send_text。"""
     from sqlalchemy.orm import sessionmaker
 
     goal, themes, phases, ws, tasks = _make_full_tree(db_session, task_executor="agent")
@@ -744,13 +746,13 @@ def test_output_reject_no_sync_http_in_manual_intervention(db_session, monkeypat
     )
 
     with (
-        patch.object(task_app_svc.OpenCodeClient, "shutdown") as mock_shutdown,
+        patch.object(task_app_svc.OpenCodeClient, "delete_session") as mock_delete,
         patch.object(task_app_svc.FeishuClient, "send_text") as mock_send,
     ):
         svc = task_app_svc.TaskAppSvc(db_session)
         data = svc.output_reject(task.id, "u1", "fb")
 
     assert data.action == "manual_intervention"
-    # output_reject 本身不同步调 shutdown / send_text
-    mock_shutdown.assert_not_called()
+    # output_reject 本身不同步调 delete_session / send_text
+    mock_delete.assert_not_called()
     mock_send.assert_not_called()

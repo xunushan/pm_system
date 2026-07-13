@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_weekly_summary_card
+from app.clients.feishu import FeishuClient, build_done_card, build_weekly_summary_card
 from app.clients.fileio import write_weekly_md
 from app.core.card_registry import set_card_context
 from app.core.exceptions import ConflictError
@@ -190,3 +190,55 @@ class WeeklyAppSvc:
         if message_id:
             set_card_context(message_id, {"type": "weekly_summary", "week": week})
         return message_id
+
+    # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
+
+    @staticmethod
+    def refresh_weekly_done_async(message_id: str, week: str) -> None:
+        """事务后异步刷新周总结卡到已阅态（独立 session，BackgroundTasks 调用）。
+
+        §S6 状态2 已阅：绿色，"✅ 周总结已阅，已归档" + 本周回顾摘要 + weekly.md 提示。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            stats = StatsAppSvc(db).get_weekly_stats("system", week)
+
+            # 每日完成汇总
+            daily_lines = []
+            for d in stats.daily_stats:
+                total = d.completed_count + d.incomplete_count
+                daily_lines.append(f"· {d.date.isoformat()}：{d.completed_count}/{total}")
+            daily_summary = "\n".join(daily_lines) or "· （无数据）"
+
+            # 阶段进展
+            phase_lines = []
+            for p in stats.phase_health:
+                phase_lines.append(f"· {p.name}：{p.completed}/{p.total} {p.status}")
+            phase_summary = "\n".join(phase_lines) or "· （无数据）"
+
+            agent_files = stats.agent_output_stats.total_files
+
+            elements = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        "✅ **周总结已阅，已归档**\n\n"
+                        "**本周回顾：**\n"
+                        f"· 每日完成：\n{daily_summary}\n"
+                        f"· 阶段：\n{phase_summary}\n"
+                        f"· 智能体产出：{agent_files} 文件"
+                    ),
+                },
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": "weekly.md 快照已写入。如需修正数据，前往 H5 页面。",
+                },
+            ]
+            card = build_done_card(f"📊 周总结已阅（{week}）", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_weekly_done_async 失败: week=%s", week)
+        finally:
+            db.close()

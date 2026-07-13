@@ -19,12 +19,13 @@ doc 只读不改，保留嵌套并在 PlanContent 中校验结构。
 """
 
 import json
+import logging
 from uuid import uuid4
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_plan_overview_card
+from app.clients.feishu import FeishuClient, build_done_card, build_plan_overview_card
 from app.config import settings
 from app.core.card_registry import set_card_context
 from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
@@ -45,6 +46,8 @@ from app.schemas.plan import (
     PlanThemeContent,
 )
 from app.services.draft_app_svc import raise_if_draft_expired
+
+logger = logging.getLogger(__name__)
 
 
 class PlanAppSvc:
@@ -187,3 +190,36 @@ class PlanAppSvc:
         )
         self.task_repo.create(task)
         return task
+
+    # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
+
+    @staticmethod
+    def refresh_overview_done_async(
+        message_id: str,
+        goal_name: str,
+        theme_count: int,
+        phase_count: int,
+        task_count: int,
+        h5_url: str,
+    ) -> None:
+        """事务后异步刷新方案总览卡到已确认态（BackgroundTasks 调用）。
+
+        §S1 确认后：绿色，"✅ 方案已确认" + 去按钮 + H5 链接（doc/09 §S1 确认后）。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        link = f"[前往配置页调整]({h5_url})" if h5_url else "前往配置页调整"
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**目标：{goal_name}**\n\n"
+                    f"专题数：{theme_count} / 阶段数：{phase_count} / 任务数：{task_count}\n\n"
+                    f"✅ **方案已确认，已正式建库**\n\n{link}"
+                ),
+            }
+        ]
+        card = build_done_card("📋 方案总览", "green", elements)
+        try:
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_overview_done_async 失败: goal=%s", goal_name)

@@ -25,6 +25,7 @@ from app.clients.feishu import (
     build_phase_linking_card,
     build_theme_completed_card,
 )
+from app.core.card_registry import set_card_context
 from app.core.redis_client import get_redis
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
@@ -90,7 +91,9 @@ def on_phase_completed(
             suggested_deadline=deadline_str,
         )
         try:
-            feishu.send_card(DEFAULT_CHAT_ID, card)
+            message_id = feishu.send_card(DEFAULT_CHAT_ID, card)
+            if message_id:
+                set_card_context(message_id, {"type": "phase_linking", "phase_id": next_phase.id})
         except Exception:  # noqa: BLE001
             logger.exception("on_phase_completed: 推衔接卡片失败 phase=%s", phase_id)
 

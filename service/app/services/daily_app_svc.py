@@ -24,7 +24,12 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_daily_plan_card
+from app.clients.feishu import (
+    FeishuClient,
+    build_daily_plan_card,
+    build_daily_summary_card,
+    build_done_card,
+)
 from app.clients.fileio import write_daily_md
 from app.clients.opencode import OpenCodeClient
 from app.core.card_registry import set_card_context
@@ -489,3 +494,145 @@ class DailyAppSvc:
                 },
             )
         return message_id
+
+    # ---- 推卡入口 + update_card 刷新（schema 2.0，doc/09 §S5）----
+
+    def push_daily_summary_card(
+        self,
+        daily_id: str,
+        date_str: str,
+        completed_tasks: list[dict],
+        incomplete_tasks: list[dict],
+        phase_health: list[dict],
+        chat_id: str,
+    ) -> str | None:
+        """推日终总结卡片（schema 2.0，doc/09 §S5 状态1）。
+
+        事务后异步 IO（铁律 §3#3）：调 build_daily_summary_card + FeishuClient.send_card。
+        send_card 返回 message_id 后存 Redis 映射 ->
+        {type:"daily_summary", daily_id}，供 confirm_btn form_submit 回调反查 daily_id
+        （P2 路由缺口落地，doc/09 §S5 状态1->2）。
+
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        card = build_daily_summary_card(
+            daily_id, date_str, completed_tasks, incomplete_tasks, phase_health
+        )
+        message_id = FeishuClient().send_card(chat_id, card)
+        if message_id:
+            set_card_context(message_id, {"type": "daily_summary", "daily_id": daily_id})
+        return message_id
+
+    @staticmethod
+    def refresh_daily_plan_done_async(message_id: str, daily_id: str) -> None:
+        """事务后异步刷新今日计划卡到终态（独立 session，BackgroundTasks 调用）。
+
+        §S3 状态2 已确认：绿色，"✅ 今日计划已确认" + 勾选任务 + 前置 + 异步执行提示。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            daily = db.get(DailyRecord, daily_id)
+            if daily is None:
+                return
+            date_str = daily.date.isoformat()
+
+            # 查 daily_tasks -> task names + executor
+            dt_rows = db.execute(
+                select(Task, Theme)
+                .join(DailyTask, DailyTask.task_id == Task.id)
+                .join(Phase, Task.phase_id == Phase.id)
+                .join(Theme, Phase.theme_id == Theme.id)
+                .where(DailyTask.daily_id == daily_id)
+            ).all()
+            task_lines = (
+                "\n".join(
+                    f"· {task.name} {_executor_tag_inline(task.executor)}" for task, _ in dt_rows
+                )
+                or "· （无）"
+            )
+
+            # 查前置 subtasks
+            pre_rows = (
+                db.execute(
+                    select(Subtask).where(
+                        Subtask.task_id.in_([r[0].id for r in dt_rows]), Subtask.type == "前置"
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            pre_lines = "\n".join(f"· {s.name}" for s in pre_rows) if pre_rows else None
+
+            elements: list[dict] = [
+                {"tag": "markdown", "content": "✅ **今日计划已确认**\n\n**今日任务：**"},
+                {"tag": "div", "text": {"tag": "lark_md", "content": task_lines}},
+            ]
+            if pre_lines:
+                elements.append({"tag": "hr"})
+                elements.append({"tag": "markdown", "content": "**今日前置：**"})
+                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": pre_lines}})
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "markdown", "content": "前置与智能体任务已异步执行。"})
+            card = build_done_card(f"📋 今日计划已确认（{date_str}）", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_daily_plan_done_async 失败: daily=%s", daily_id)
+        finally:
+            db.close()
+
+    @staticmethod
+    def refresh_summary_done_async(message_id: str, daily_id: str) -> None:
+        """事务后异步刷新日终总结卡到终态（独立 session，BackgroundTasks 调用）。
+
+        §S5 状态2 已确认：绿色，"✅ 日终总结已确认" + 任务最终状态（✅/❌）+ 阶段进展。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            daily = db.get(DailyRecord, daily_id)
+            if daily is None:
+                return
+            date_str = daily.date.isoformat()
+            stats = StatsAppSvc(db).get_daily_stats("system", daily.date)
+
+            # 任务最终状态（✅/❌）
+            task_lines = []
+            for t in stats.completed_tasks:
+                task_lines.append(f"· {t.name} ✅ 已完成")
+            for t in stats.incomplete_tasks:
+                task_lines.append(f"· {t.name} ❌ 未完成")
+            task_list = "\n".join(task_lines) or "· （无任务）"
+
+            # 阶段进展
+            if stats.phase_health:
+                phase_lines = "\n".join(
+                    f"· {p.name}：{p.completed}/{p.total} {p.status}" for p in stats.phase_health
+                )
+            else:
+                phase_lines = "· （无阶段数据）"
+
+            elements = [
+                {"tag": "markdown", "content": "✅ **日终总结已确认**\n\n**今日任务最终状态：**"},
+                {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
+                {"tag": "hr"},
+                {
+                    "tag": "markdown",
+                    "content": (f"**阶段进展：**\n{phase_lines}\n\n daily.md 快照已写入。"),
+                },
+            ]
+            card = build_done_card(f"📊 日终总结已确认（{date_str}）", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_summary_done_async 失败: daily=%s", daily_id)
+        finally:
+            db.close()
+
+
+def _executor_tag_inline(executor: str | None) -> str:
+    """内联 executor 标签（用于 daily plan done card 展示）。"""
+    if executor is None:
+        return ""
+    if executor.startswith("["):
+        return executor
+    return {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
