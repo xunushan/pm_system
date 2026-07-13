@@ -179,8 +179,12 @@ def test_weekly_confirm_updates_existing_record(client, db_session, monkeypatch)
     assert recs[0].is_confirmed is True
 
 
-def test_weekly_confirm_duplicate_returns_409(client, db_session, monkeypatch):
-    """重复确认 -> 409。"""
+def test_weekly_confirm_duplicate_is_idempotent(client, db_session, monkeypatch):
+    """重复确认幂等 -> 200（不抛 409，保证 webhook 可同步返回终态卡刷新，铁律 §11）。
+
+    回归 #P1：飞书回调重试/用户重复点击时，已确认的 confirm_summary 抛 ConflictError
+    -> webhook 返回 409（非方案B）-> 卡片不刷新、按钮仍可点。
+    """
     goal, themes, phases, tasks, daily = _setup_week(
         db_session, tasks_per_phase=1, completed_count=0
     )
@@ -192,10 +196,15 @@ def test_weekly_confirm_duplicate_returns_409(client, db_session, monkeypatch):
     with patch.object(weekly_app_svc, "write_weekly_md"):
         resp1 = client.post(f"{_API}/weekly/summary/confirm", json={"week": _WEEK})
         assert resp1.status_code == 200
+        assert resp1.json()["data"]["confirmed"] is True
 
+        # 重复确认 -> 仍 200（幂等，不抛 409）
         resp2 = client.post(f"{_API}/weekly/summary/confirm", json={"week": _WEEK})
-    assert resp2.status_code == 409
-    assert resp2.json()["code"] == 1003
+    assert resp2.status_code == 200
+    assert resp2.json()["data"]["confirmed"] is True
+
+    db_session.flush()
+    assert len(db_session.query(WeeklyRecord).filter_by(week=_WEEK).all()) == 1
 
 
 def test_weekly_confirm_does_not_change_task_phase_status(client, db_session, monkeypatch):

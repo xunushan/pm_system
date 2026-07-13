@@ -21,7 +21,6 @@ from sqlalchemy.orm import Session
 from app.clients.feishu import FeishuClient, build_done_card, build_weekly_summary_card
 from app.clients.fileio import write_weekly_md
 from app.core.card_registry import set_card_context
-from app.core.exceptions import ConflictError
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
 from app.models.weekly_record import WeeklyRecord
@@ -65,7 +64,9 @@ class WeeklyAppSvc:
         existing = self.weekly_repo.get_by_week(week)
         if existing is not None:
             if existing.is_confirmed:
-                raise ConflictError(f"周总结已确认: {week}")
+                # 幂等：已确认的重复点击（飞书回调重试/用户重复点击）直接返回成功，
+                # 不抛 ConflictError，保证 webhook 能同步返回终态卡刷新（铁律 §11）。
+                return WeeklyConfirmData(week=week, confirmed=True, weekly_md_path=None)
             existing.is_confirmed = True
             existing.confirmed_at = now_utc_naive()
         else:
@@ -190,6 +191,72 @@ class WeeklyAppSvc:
         if message_id:
             set_card_context(message_id, {"type": "weekly_summary", "week": week})
         return message_id
+
+    def push_weekly_summary_card_from_db(
+        self, week: str, chat_id: str, next_week_advice: str = ""
+    ) -> str | None:
+        """从 DB 汇总本周数据 -> 推周总结卡片（schema 2.0，doc/09 §S6 状态1）。
+
+        服务自己「日汇总到周」（铁律 §3#1 纯确定性逻辑归 Service）：调
+        StatsAppSvc.get_weekly_stats 取本周完成任务列表/每日趋势/阶段健康度/智能体产出，
+        组装成 builder 期望的 dict -> build_weekly_summary_card -> send_card -> 存映射。
+        pm-summary Skill 与定时任务只调本方法（传 week + chat_id），不查 DB、不 mock 数据。
+
+        :param next_week_advice: 下周建议（pm-summary LLM 生成，Service 不调 LLM）。
+            服务推卡/定时触发无 LLM 建议时传空串（卡片该行留空），pm-summary 可后续
+            update_card 补真实建议。
+        :return: 飞书 message_id（未配置飞书时返回 None）。
+        """
+        stats = StatsAppSvc(self.db).get_weekly_stats("system", week)
+        start_date = stats.date_range.start.isoformat()
+        end_date = stats.date_range.end.isoformat()
+
+        # 本周完成任务列表（date/task_name/executor）
+        completed_tasks = [
+            {
+                "date": t.date,
+                "task_name": t.task_name,
+                "executor": t.executor or "",
+            }
+            for t in stats.completed_tasks
+        ]
+
+        # 每日完成趋势（date/weekday/completed/total）
+        weekday_names = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        daily_trends = [
+            {
+                "date": d.date.isoformat(),
+                "weekday": weekday_names[d.date.weekday()],
+                "completed": d.completed_count,
+                "total": d.completed_count + d.incomplete_count,
+            }
+            for d in stats.daily_stats
+        ]
+
+        # 阶段健康度（name/completed/total/status）
+        phase_health = [
+            {
+                "name": p.name,
+                "completed": p.completed,
+                "total": p.total,
+                "status": p.status,
+            }
+            for p in stats.phase_health
+        ]
+
+        agent_output_count = stats.agent_output_stats.total_files
+
+        return self.push_weekly_summary_card(
+            week=week,
+            start_date=start_date,
+            end_date=end_date,
+            completed_tasks=completed_tasks,
+            daily_trends=daily_trends,
+            phase_health=phase_health,
+            agent_output_count=agent_output_count,
+            next_week_advice=next_week_advice,
+            chat_id=chat_id,
+        )
 
     # ---- 终态卡片构建（纯函数 + _from_db 供 webhook 同步返回）----
 

@@ -29,6 +29,7 @@ from app.schemas.weekly import (
     SubtaskStats,
     SubtaskStatsItem,
     SupervisorLinkingStatus,
+    WeeklyCompletedTaskItem,
     WeeklyStatsData,
 )
 
@@ -130,6 +131,7 @@ class StatsAppSvc:
         start, end = self._parse_week(week)
 
         daily_stats = self._query_daily_stats_for_week(start, end)
+        completed_tasks = self._query_completed_tasks_for_week(start, end)
         phase_health = self._query_phase_health()
         agent_output_stats = self._query_agent_output_stats(start, end)
         subtask_stats = self._query_subtask_stats(start, end)
@@ -145,6 +147,7 @@ class StatsAppSvc:
             week=week,
             date_range=DateRange(start=start, end=end),
             daily_stats=daily_stats,
+            completed_tasks=completed_tasks,
             phase_health=phase_health,
             agent_output_stats=agent_output_stats,
             subtask_stats=subtask_stats,
@@ -202,6 +205,39 @@ class StatsAppSvc:
                     )
                 )
             cur += timedelta(days=1)
+        return result
+
+    def _query_completed_tasks_for_week(
+        self, start: date, end: date
+    ) -> list[WeeklyCompletedTaskItem]:
+        """本周已完成任务列表（按 tasks.completed_at 聚合到周，doc/09 §S6）。
+
+        纯确定性查询（铁律 §3#1）：completed_at 落在 [start, end] 内的已完成任务，
+        JOIN theme 取 theme_name，executor 取 tasks.executor（规划态可空）。
+        供 push_weekly_summary_card_from_db 组装周总结卡「本周完成任务」+ pm-summary 参考。
+        """
+        start_dt = datetime.combine(start, datetime.min.time())
+        end_dt = datetime.combine(end, datetime.max.time())
+        rows = self.db.execute(
+            select(Task, Theme.name)
+            .join(Phase, Task.phase_id == Phase.id)
+            .join(Theme, Phase.theme_id == Theme.id)
+            .where(Task.status == "已完成", Task.completed_at.is_not(None))
+            .where(Task.completed_at.between(start_dt, end_dt))
+            .order_by(Task.completed_at)
+        ).all()
+        result: list[WeeklyCompletedTaskItem] = []
+        for task, theme_name in rows:
+            completed_at = task.completed_at
+            date_str = completed_at.date().isoformat() if completed_at else ""
+            result.append(
+                WeeklyCompletedTaskItem(
+                    date=date_str,
+                    task_name=task.name,
+                    executor=task.executor,
+                    theme_name=theme_name,
+                )
+            )
         return result
 
     def _query_agent_output_stats(self, start: date, end: date) -> AgentOutputStats:

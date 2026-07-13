@@ -30,6 +30,19 @@ class DailyStatsItem(BaseModel):
     incomplete_count: int = 0
 
 
+class WeeklyCompletedTaskItem(BaseModel):
+    """本周已完成任务项（按 tasks.completed_at 聚合到周）。
+
+    供 push_weekly_summary_card_from_db 组装周总结卡「本周完成任务」列表
+    （date/task_name/executor）+ pm-summary LLM 参考。纯 Service 查询，非 LLM。
+    """
+
+    date: str
+    task_name: str
+    executor: str | None = None
+    theme_name: str = ""
+
+
 class AgentOutputStats(BaseModel):
     """本周智能体产出统计（workspace_progress 聚合）。"""
 
@@ -70,6 +83,7 @@ class WeeklyStatsData(BaseModel):
     week: str
     date_range: DateRange
     daily_stats: list[DailyStatsItem] = []
+    completed_tasks: list[WeeklyCompletedTaskItem] = []
     phase_health: list[PhaseHealthItem] = []
     agent_output_stats: AgentOutputStats
     subtask_stats: SubtaskStats

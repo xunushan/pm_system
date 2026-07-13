@@ -142,7 +142,9 @@ class DailyAppSvc:
         if daily is None:
             raise NotFoundError(f"每日计划记录不存在: {daily_id}")
         if daily.is_confirmed:
-            raise ConflictError(f"日终总结已确认: {daily_id}")
+            # 幂等：已确认的重复点击（飞书回调重试/用户重复点击）直接返回成功，
+            # 不抛 ConflictError，保证 webhook 能同步返回终态卡刷新（铁律 §11）。
+            return DailySummaryConfirmData(daily_id=daily_id, confirmed=True, daily_md_path=None)
 
         daily.is_confirmed = True
         daily.confirmed_at = now_utc_naive()

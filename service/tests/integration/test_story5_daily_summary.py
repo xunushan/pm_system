@@ -161,20 +161,39 @@ def test_summary_confirm_not_found(client, db_session):
     assert resp.json()["code"] == 1001
 
 
-def test_summary_confirm_already_confirmed(client, db_session):
-    """重复确认 -> 409。"""
-    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
-        db_session, tasks_per_phase=1, completed_count=0
-    )
-    daily.is_confirmed = True
-    db_session.flush()
+def test_summary_confirm_already_confirmed_is_idempotent(client, db_session, monkeypatch):
+    """重复确认幂等 -> 200（不抛 409，保证 webhook 可同步返回终态卡刷新，铁律 §11）。
 
-    resp = client.post(
-        f"{_API}/daily/summary/confirm",
-        json={"daily_id": daily.id},
+    回归 #P1：飞书回调重试/用户重复点击时，已确认的 confirm_summary 抛 ConflictError
+    -> webhook 返回 409（非方案B）-> 卡片不刷新、按钮仍可点。
+    """
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=1
     )
-    assert resp.status_code == 409
-    assert resp.json()["code"] == 1003
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+    with patch.object(daily_app_svc, "write_daily_md"):
+        # 第一次确认 -> 200
+        resp1 = client.post(
+            f"{_API}/daily/summary/confirm",
+            json={"daily_id": daily.id},
+        )
+        assert resp1.status_code == 200
+        assert resp1.json()["data"]["confirmed"] is True
+
+        # 重复确认 -> 仍 200（幂等，不抛 409）
+        resp2 = client.post(
+            f"{_API}/daily/summary/confirm",
+            json={"daily_id": daily.id},
+        )
+    assert resp2.status_code == 200
+    assert resp2.json()["data"]["confirmed"] is True
+
+    db_session.flush()
+    assert daily.is_confirmed is True
 
 
 # ===== PATCH /tasks/{id}（日终异议双向）=====
@@ -494,6 +513,49 @@ def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["toast"]["content"] == "日终总结已确认"
+
+    db_session.flush()
+    assert daily.is_confirmed is True
+
+
+def test_webhook_story5_confirm_summary_repeat_click_idempotent(client, db_session, monkeypatch):
+    """重复点击确认 -> 第二次仍返回方案B终态卡（不 409），卡片可刷新（铁律 §11）。
+
+    回归 #P1：用户报告"确认后报错，卡片没刷新，按钮仍可点"。根因是已确认 daily
+    再点 -> confirm_summary 抛 ConflictError -> webhook 返回 409（非方案B）-> 不刷新。
+    """
+    goal, themes, phases, tasks, daily = _setup_daily_with_tasks(
+        db_session, tasks_per_phase=1, completed_count=0
+    )
+    monkeypatch.setattr(
+        daily_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
+    with patch.object(daily_app_svc, "write_daily_md"):
+        payload = _daily_summary_payload("om_test", {f"task_{tasks[0].id}": False})
+
+        # 第一次点击 -> 方案B：toast + card.data
+        resp1 = client.post(_WEBHOOK, json=payload)
+        assert resp1.status_code == 200
+        body1 = resp1.json()
+        assert body1["toast"]["content"] == "日终总结已确认"
+        assert body1["card"]["type"] == "raw"
+        assert body1["card"]["data"]["schema"] == "2.0"
+
+        # 重复点击 -> 仍方案B（不 409），卡片可刷新
+        resp2 = client.post(_WEBHOOK, json=payload)
+    assert resp2.status_code == 200
+    body2 = resp2.json()
+    assert body2["toast"]["content"] == "日终总结已确认"
+    assert body2["card"]["type"] == "raw"
+    assert body2["card"]["data"]["schema"] == "2.0"
+    # 没有 code=1003 的错误响应
+    assert "code" not in body2 or body2.get("code") != 1003
 
     db_session.flush()
     assert daily.is_confirmed is True
