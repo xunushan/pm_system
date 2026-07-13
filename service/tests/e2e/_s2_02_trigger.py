@@ -22,7 +22,9 @@ def main() -> None:
         goal_id, goal_name = goal[0], goal[1]
         # 只取未激活的「知识管理闭环」专题
         row = db.execute(
-            text("SELECT id, name, type FROM themes WHERE goal_id=:gid AND status='未开始' LIMIT 1"),
+            text(
+                "SELECT id, name, type FROM themes WHERE goal_id=:gid AND status='未开始' LIMIT 1"
+            ),
             {"gid": goal_id},
         ).fetchone()
         if not row:

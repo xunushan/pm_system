@@ -27,7 +27,9 @@ def main() -> None:
             print("  ✓ 1 goal / 4 themes / 4 phases / 12 tasks")
 
         # 2. draft 已删
-        draft_n = c.execute(text("SELECT COUNT(*) FROM drafts WHERE id=:id"), {"id": DRAFT_ID}).scalar()
+        draft_n = c.execute(
+            text("SELECT COUNT(*) FROM drafts WHERE id=:id"), {"id": DRAFT_ID}
+        ).scalar()
         print(f"[删draft] drafts 该条 = {draft_n}")
         if draft_n != 0:
             print("  ✗ draft 未删（确认未生效或并发问题）")
@@ -36,9 +38,7 @@ def main() -> None:
             print("  ✓ draft 已删除")
 
         # 3. goal 名称 + 初始状态（规划态未开始）
-        row = c.execute(
-            text("SELECT name, status FROM goals LIMIT 1")
-        ).fetchone()
+        row = c.execute(text("SELECT name, status FROM goals LIMIT 1")).fetchone()
         if row:
             print(f"[goal] name={row[0]} status={row[1]}")
             if row[0] != "知识库构建" or row[1] != "未开始":
@@ -51,7 +51,9 @@ def main() -> None:
             ok = False
 
         # 4. executor 规划态不填（铁律 §8）
-        null_exec = c.execute(text("SELECT COUNT(*) FROM tasks WHERE executor IS NOT NULL")).scalar()
+        null_exec = c.execute(
+            text("SELECT COUNT(*) FROM tasks WHERE executor IS NOT NULL")
+        ).scalar()
         print(f"[铁律§8] tasks.executor 非空数 = {null_exec}")
         if null_exec != 0:
             print("  ✗ 规划态 executor 应为 NULL")
@@ -60,7 +62,9 @@ def main() -> None:
             print("  ✓ 12 任务 executor 全 NULL（pm-daily 按专题推断）")
 
         # 5. phases.deadline 规划态不填（铁律 §8）
-        nonnull_dl = c.execute(text("SELECT COUNT(*) FROM phases WHERE deadline IS NOT NULL")).scalar()
+        nonnull_dl = c.execute(
+            text("SELECT COUNT(*) FROM phases WHERE deadline IS NOT NULL")
+        ).scalar()
         print(f"[铁律§8] phases.deadline 非空数 = {nonnull_dl}")
         if nonnull_dl != 0:
             print("  ✗ 规划态 deadline 应为 NULL")

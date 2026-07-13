@@ -36,8 +36,16 @@ PLAN_CONTENT = {
                     "sort_order": 1,
                     "tasks": [
                         {"name": "理论推导", "sort_order": 1, "description": "渠道设计与过滤机制"},
-                        {"name": "代码实现与工程化", "sort_order": 2, "description": "部署 RSSHub + 抓取 Pipeline"},
-                        {"name": "总结+面试题库整理", "sort_order": 3, "description": "输出渠道矩阵与面试题"},
+                        {
+                            "name": "代码实现与工程化",
+                            "sort_order": 2,
+                            "description": "部署 RSSHub + 抓取 Pipeline",
+                        },
+                        {
+                            "name": "总结+面试题库整理",
+                            "sort_order": 3,
+                            "description": "输出渠道矩阵与面试题",
+                        },
                     ],
                 }
             ],
@@ -52,8 +60,16 @@ PLAN_CONTENT = {
                     "sort_order": 1,
                     "tasks": [
                         {"name": "理论推导", "sort_order": 1, "description": "5C 评估与精读三阶段"},
-                        {"name": "代码实现与工程化", "sort_order": 2, "description": "笔记模板与归档系统"},
-                        {"name": "总结+面试题库整理", "sort_order": 3, "description": "输出沉淀 SOP"},
+                        {
+                            "name": "代码实现与工程化",
+                            "sort_order": 2,
+                            "description": "笔记模板与归档系统",
+                        },
+                        {
+                            "name": "总结+面试题库整理",
+                            "sort_order": 3,
+                            "description": "输出沉淀 SOP",
+                        },
                     ],
                 }
             ],
@@ -67,9 +83,21 @@ PLAN_CONTENT = {
                     "name": "阶段1：知识库架构和RAG",
                     "sort_order": 1,
                     "tasks": [
-                        {"name": "理论推导", "sort_order": 1, "description": "向量检索算法与 RAG 链路"},
-                        {"name": "代码实现与工程化", "sort_order": 2, "description": "部署 Embedding + 向量库"},
-                        {"name": "总结+面试题库整理", "sort_order": 3, "description": "输出架构图与优化 checklist"},
+                        {
+                            "name": "理论推导",
+                            "sort_order": 1,
+                            "description": "向量检索算法与 RAG 链路",
+                        },
+                        {
+                            "name": "代码实现与工程化",
+                            "sort_order": 2,
+                            "description": "部署 Embedding + 向量库",
+                        },
+                        {
+                            "name": "总结+面试题库整理",
+                            "sort_order": 3,
+                            "description": "输出架构图与优化 checklist",
+                        },
                     ],
                 }
             ],
@@ -84,8 +112,16 @@ PLAN_CONTENT = {
                     "sort_order": 1,
                     "tasks": [
                         {"name": "理论推导", "sort_order": 1, "description": "消费推送与回流机制"},
-                        {"name": "代码实现与工程化", "sort_order": 2, "description": "实现查询接口与推送"},
-                        {"name": "总结+面试题库整理", "sort_order": 3, "description": "输出闭环流程图"},
+                        {
+                            "name": "代码实现与工程化",
+                            "sort_order": 2,
+                            "description": "实现查询接口与推送",
+                        },
+                        {
+                            "name": "总结+面试题库整理",
+                            "sort_order": 3,
+                            "description": "输出闭环流程图",
+                        },
                     ],
                 }
             ],

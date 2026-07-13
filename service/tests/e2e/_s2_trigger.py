@@ -1,6 +1,7 @@
 """E2E S2 触发：直调 ScheduleAppSvc.push_schedule_card 推调度卡片 A（选专题）。
 
-走服务（铁律 §11：推卡逻辑在 Service，Skill 只识别意图调 Service；e2e 测服务直调 Service 推卡方法）。
+走服务（铁律 §11：推卡逻辑在 Service，Skill 只识别意图调 Service；
+e2e 测服务直调 Service 推卡方法）。
 S2 流程：推卡片 A -> 用户勾选专题+点「下一步」-> patch 卡片 B（填 deadline）->
 用户填 deadline+点「确认调度」-> 激活 phase + 级联 + workspace 初始化。
 

@@ -4,7 +4,6 @@
 """
 
 import httpx
-from sqlalchemy import text
 
 from app.config import settings
 from app.db.session import SessionLocal
@@ -18,7 +17,9 @@ PREREQ_NAME = "环境准备：确认 Obsidian 仓库可写"
 
 def main() -> None:
     # 真实 API 取候选池
-    resp = httpx.get(f"{API}/api/v1/daily/plans/pool", params={"user_id": "feishu_user"}, timeout=10)
+    resp = httpx.get(
+        f"{API}/api/v1/daily/plans/pool", params={"user_id": "feishu_user"}, timeout=10
+    )
     resp.raise_for_status()
     pool = resp.json()["data"]
     pending = pool["pending_tasks"]

@@ -31,9 +31,9 @@ def main() -> None:
         f"phase_health={len(s['phase_health'])}"
     )
     for t in s["completed_tasks"]:
-        print(f"  ✅ {t['name']} | {t.get('theme_name','')}")
+        print(f"  ✅ {t['name']} | {t.get('theme_name', '')}")
     for t in s["incomplete_tasks"]:
-        print(f"  ❌ {t['name']} | {t.get('theme_name','')}")
+        print(f"  ❌ {t['name']} | {t.get('theme_name', '')}")
 
     # 2. 直调 Service 推日终总结卡
     completed = [

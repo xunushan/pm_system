@@ -15,8 +15,6 @@ import sys
 import httpx
 from sqlalchemy import text
 
-from app.config import settings
-
 API = "http://localhost:8001"
 
 # S4A-02 用：指定第二个 task（脚本参数传 task_id，不传则取第一个待执行）
