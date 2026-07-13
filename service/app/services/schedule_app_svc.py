@@ -18,7 +18,12 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from app.clients.feishu import FeishuClient, build_schedule_card_a, build_schedule_card_b
+from app.clients.feishu import (
+    FeishuClient,
+    build_done_card,
+    build_schedule_card_a,
+    build_schedule_card_b,
+)
 from app.clients.workspace import is_path_valid
 from app.core import audit, cascade, state_machine
 from app.core.card_registry import set_card_context
@@ -31,6 +36,7 @@ from app.core.exceptions import (
 from app.core.times import now_utc_naive
 from app.db.session import SessionLocal
 from app.models.goal import Goal
+from app.models.phase import Phase
 from app.models.theme import Theme
 from app.models.workspace import Workspace
 from app.repositories.goal import GoalRepository
@@ -343,5 +349,108 @@ class ScheduleAppSvc:
             set_card_context(message_id, {"type": "schedule_b", "goal_id": goal_id})
         except Exception:
             logger.exception("patch_to_card_b_async 失败: message_id=%s", message_id)
+        finally:
+            db.close()
+
+    # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
+
+    @staticmethod
+    def refresh_schedule_done_async(
+        message_id: str, goal_id: str, activated_phases: list[dict]
+    ) -> None:
+        """事务后异步刷新调度卡 B 到终态（独立 session，BackgroundTasks 调用）。
+
+        §S2 状态3 已确认：绿色，"✅ 调度已确认" + 激活阶段 + deadline + 工作空间提示。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+
+        :param activated_phases: [{"phase_id": "...", "name": "...", "deadline": "2026-07-15"}, ...]
+        """
+        db = SessionLocal()
+        try:
+            goal = db.get(Goal, goal_id) if goal_id else None
+            goal_name = goal.name if goal else ""
+
+            phase_lines = []
+            for ap in activated_phases:
+                phase = db.get(Phase, ap.get("phase_id", ""))
+                theme_name = ""
+                if phase:
+                    theme = db.get(Theme, phase.theme_id)
+                    theme_name = theme.name if theme else ""
+                deadline_str = ap.get("deadline", "")
+                label = f"{theme_name} / {ap.get('name', '')}" if theme_name else ap.get("name", "")
+                phase_lines.append(f"· {label} - deadline {deadline_str}")
+
+            elements: list[dict] = [
+                {
+                    "tag": "markdown",
+                    "content": f"**目标：{goal_name}**\n\n✅ **调度已确认，已激活以下阶段：**",
+                },
+            ]
+            for line in phase_lines:
+                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": line}})
+            elements.append({"tag": "hr"})
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": "工作空间正在初始化。调整请[前往配置页](<h5_url>)",
+                }
+            )
+            card = build_done_card("🎯 调度已确认", "green", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_schedule_done_async 失败: goal=%s", goal_id)
+        finally:
+            db.close()
+
+    @staticmethod
+    def refresh_activate_done_async(message_id: str, phase_name: str, deadline_str: str) -> None:
+        """事务后异步刷新衔接卡到已激活态（独立 session，BackgroundTasks 调用）。
+
+        §S8 状态2 已激活：绿色，"✅ 下一阶段已激活" + deadline + 工作空间提示。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"✅ **下一阶段已激活：{phase_name}**\n\n"
+                    f"· deadline：{deadline_str}\n"
+                    "· 工作空间已就绪\n\n"
+                    "阶段已进入进行中，即时级联已触发。"
+                ),
+            }
+        ]
+        card = build_done_card("✅ 阶段已激活", "green", elements)
+        try:
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_activate_done_async 失败: phase=%s", phase_name)
+
+    @staticmethod
+    def refresh_defer_done_async(message_id: str, phase_id: str) -> None:
+        """事务后异步刷新衔接卡到暂缓态（独立 session，BackgroundTasks 调用）。
+
+        §S8 状态3 已暂缓：橙色，"⏳ 已记录暂缓" + 24h 后提醒 + H5 链接。
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        """
+        db = SessionLocal()
+        try:
+            phase = db.get(Phase, phase_id)
+            phase_name = phase.name if phase else phase_id
+            elements = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**下一阶段：{phase_name}**\n\n"
+                        "⏳ **已记录暂缓激活，24 小时后将再次提醒**\n\n"
+                        "如需立即激活，前往 H5 页面手动操作。"
+                    ),
+                }
+            ]
+            card = build_done_card("⏳ 已记录暂缓", "orange", elements)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_defer_done_async 失败: phase=%s", phase_id)
         finally:
             db.close()

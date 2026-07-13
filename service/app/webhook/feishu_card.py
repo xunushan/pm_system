@@ -116,7 +116,16 @@ async def feishu_card_callback(
         if not draft_id:
             return {"code": 1002, "message": "回调缺少 draft_id", "data": None}
         data = PlanAppSvc(db).confirm(draft_id)
-        # update_card 刷已确认态归 PR-D2（全回调 update_card 补全）
+        # 事务后异步：update_card 刷已确认态（doc/09 §S1 确认后）
+        background_tasks.add_task(
+            PlanAppSvc.refresh_overview_done_async,
+            message_id,
+            data.goal_name,
+            data.themes_created,
+            data.phases_created,
+            data.tasks_created,
+            data.h5_url,
+        )
         return ApiResponse(data=data).model_dump()
 
     if action_id == "story6_已阅周总结":
@@ -128,6 +137,8 @@ async def feishu_card_callback(
         data = WeeklyAppSvc(db).confirm_summary(week)
         # 事务后异步：写 weekly.md 快照（3 秒超时内不阻塞）
         background_tasks.add_task(WeeklyAppSvc.write_weekly_md_async, week)
+        # 事务后异步：update_card 刷已阅态（doc/09 §S6 状态2）
+        background_tasks.add_task(WeeklyAppSvc.refresh_weekly_done_async, message_id, week)
         return ApiResponse(data=data).model_dump()
 
     if action_id == "story8_去激活":
@@ -178,7 +189,10 @@ async def feishu_card_callback(
         task_id = ctx["task_id"]
         # 事务内：UPDATE task 已完成 + 即时级联 + 审计（<200ms）；立即返回
         data = TaskAppSvc(db).output_confirm(task_id, _DEFAULT_USER_ID, [])
-        # update_card 刷已确认态归 PR-D2
+        # 事务后异步：update_card 刷验收通过态（doc/09 §S4A 场景1 点验收通过后）
+        background_tasks.add_task(
+            TaskAppSvc.refresh_verification_done_async, message_id, task_id, True
+        )
         return ApiResponse(data=data).model_dump()
 
     if btn_name == "btn_reject":
@@ -195,9 +209,18 @@ async def feishu_card_callback(
         task_id = ctx["task_id"]
         # 事务内：retry_count+=1（<200ms）；立即返回
         data = TaskAppSvc(db).output_reject(task_id, _DEFAULT_USER_ID, feedback)
-        # 事务后异步：retry 的 dispatch_task + manual_intervention 的 shutdown
-        # （PR-D2 接 delete_session）
+        # 事务后异步：retry 的 dispatch_task + manual_intervention 的 delete_session（D26）
         background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, feedback)
+        # 事务后异步：update_card 刷反馈已下发态（doc/09 §S4A 场景2 点需要修改后）
+        # 仅 retry 路径刷反馈态；manual_intervention 路径（3 次不通过）推人工接手卡（不更新原卡）
+        if data.action == "retry":
+            background_tasks.add_task(
+                TaskAppSvc.refresh_verification_done_async,
+                message_id,
+                task_id,
+                False,
+                feedback,
+            )
         return ApiResponse(data=data).model_dump()
 
     # ---- S8 衔接卡：btn_activate / btn_defer（doc/09 §S8）----
@@ -219,6 +242,13 @@ async def feishu_card_callback(
         # 事务后异步：managed=1 工作空间初始化（3 秒超时内不阻塞）
         if data.workspace_managed and data.workspace_status == "未初始化":
             background_tasks.add_task(WorkspaceAppSvc.init, data.workspace_id)
+        # 事务后异步：update_card 刷已激活态（doc/09 §S8 状态2）
+        background_tasks.add_task(
+            ScheduleAppSvc.refresh_activate_done_async,
+            message_id,
+            data.name,
+            data.deadline.isoformat() if data.deadline else "",
+        )
         return ApiResponse(data=data).model_dump()
 
     if btn_name == "btn_defer":
@@ -228,6 +258,8 @@ async def feishu_card_callback(
         phase_id = (ctx or {}).get("phase_id", "")
         # 记录暂缓：不激活，24h 后巡检再提醒（doc/06 表2 story8_暂不激活）
         logger.info("btn_defer: phase=%s 用户选择暂不激活，24h 后巡检再提醒", phase_id)
+        # 事务后异步：update_card 刷暂缓态（doc/09 §S8 状态3）
+        background_tasks.add_task(ScheduleAppSvc.refresh_defer_done_async, message_id, phase_id)
         return {"code": 0, "message": "已记录，24h 后再提醒", "data": {"phase_id": phase_id}}
 
     # ---- confirm_btn（多卡复用，靠 card_registry type 分发）----
@@ -270,6 +302,21 @@ async def feishu_card_callback(
             for ap in data.activated_phases:
                 if ap.workspace_managed:
                     background_tasks.add_task(WorkspaceAppSvc.init, ap.workspace_id)
+            # 事务后异步：update_card 刷已确认态（doc/09 §S2 状态3）
+            activated = [
+                {
+                    "phase_id": ap.phase_id,
+                    "name": ap.name,
+                    "deadline": ap.deadline.isoformat() if ap.deadline else "",
+                }
+                for ap in data.activated_phases
+            ]
+            background_tasks.add_task(
+                ScheduleAppSvc.refresh_schedule_done_async,
+                message_id,
+                goal_id,
+                activated,
+            )
             return ApiResponse(data=data).model_dump()
 
         # S3 确认今日计划（doc/09 §S3 状态1->2）
@@ -302,6 +349,10 @@ async def feishu_card_callback(
             # 事务后异步：opencode 执行前置 + 启动智能体 serve（3 秒超时内不阻塞）
             if data.async_triggered:
                 background_tasks.add_task(DailyAppSvc.trigger_async, data.daily_id)
+            # 事务后异步：update_card 刷已确认态（doc/09 §S3 状态2）
+            background_tasks.add_task(
+                DailyAppSvc.refresh_daily_plan_done_async, message_id, data.daily_id
+            )
             return ApiResponse(data=data).model_dump()
 
         # S4B 确认后置（doc/09 §S4B 状态1->2）
@@ -321,6 +372,13 @@ async def feishu_card_callback(
             # 事务后异步：opencode run 执行后置（3 秒超时内不阻塞）
             if data.async_triggered:
                 background_tasks.add_task(TaskAppSvc.trigger_post_async, task_id)
+            # 事务后异步：update_card 刷确认后中间态（doc/09 §S4B 状态2）
+            background_tasks.add_task(
+                TaskAppSvc.refresh_post_confirm_done_async,
+                message_id,
+                task_id,
+                data.post_subtask_count > 0,
+            )
             return ApiResponse(data=data).model_dump()
 
         # S5 确认日终总结（doc/09 §S5 状态1->2）
@@ -351,6 +409,8 @@ async def feishu_card_callback(
             data = DailyAppSvc(db).confirm_summary(daily_id)
             # 事务后异步：写 daily.md 快照（3 秒超时内不阻塞）
             background_tasks.add_task(DailyAppSvc.write_daily_md_async, daily_id)
+            # 事务后异步：update_card 刷已确认态（doc/09 §S5 状态2）
+            background_tasks.add_task(DailyAppSvc.refresh_summary_done_async, message_id, daily_id)
             return ApiResponse(data=data).model_dump()
 
         # S4A 场景4 确认完成（doc/09 §S4A 场景4）
@@ -376,10 +436,20 @@ async def feishu_card_callback(
             for tid in completed:
                 data = TaskAppSvc(db).confirm_complete(tid, _DEFAULT_USER_ID)
                 results.append({"task_id": tid, "action": "completed"})
-            # reassign：改 executor=agent + 重新下发（事务内改 executor，事务后异步下发）
+            # reassign：改 executor=agent（事务内），事务后异步下发（铁律 §3#3/#4）
             for tid in reassigned:
                 data = TaskAppSvc(db).reassign_to_agent(tid, _DEFAULT_USER_ID)
                 results.append({"task_id": tid, "action": "reassigned"})
+                # 事务后异步：start_agent_serve（IO，BackgroundTasks）
+                background_tasks.add_task(TaskAppSvc.reassign_to_agent_async, tid)
+            # 事务后异步：update_card 刷确认完成已提交态（doc/09 §S4A 场景4 点确认完成后）
+            workspace_id = ctx.get("workspace_id", "")
+            background_tasks.add_task(
+                TaskAppSvc.refresh_task_complete_done_async,
+                message_id,
+                workspace_id,
+                results,
+            )
             return {"code": 0, "message": "确认完成已提交", "data": {"results": results}}
 
         # 未知 card_type

@@ -1,0 +1,527 @@
+"""PR-D2 集成测试：全回调 update_card + delete_session + 4 推卡映射补全。
+
+覆盖：
+  - 4 推卡入口 card_registry 映射（PR-D1 P1 回归）：phase_linking/handlers+scheduler、
+    daily_summary、task_complete、post_confirm
+  - 12 回调 update_card 补全（doc/09 §通用规则）：每个回调点击后异步刷终态卡
+  - delete_session 接入（D26）：trigger_reject_async 3 次不通过退 session
+  - reassign_to_agent 异步化（P2）：事务内改 executor，事务后异步 start_agent_serve
+"""
+
+from datetime import date
+from unittest.mock import patch
+from uuid import uuid4
+
+import fakeredis
+import pytest
+from sqlalchemy.orm import sessionmaker
+
+from app.clients.feishu import FeishuClient
+from app.core.card_registry import get_card_context
+from app.models.daily_record import DailyRecord
+from app.models.daily_task import DailyTask
+from app.models.task import Task
+from app.services import daily_app_svc, plan_app_svc, schedule_app_svc, task_app_svc, weekly_app_svc
+from app.services.daily_app_svc import DailyAppSvc
+from app.services.plan_app_svc import PlanAppSvc
+from app.services.task_app_svc import TaskAppSvc
+from tests._factory import make_tree
+
+_WEBHOOK = "/webhook/feishu/card"
+_TODAY = date(2026, 7, 6)
+
+
+# ---- helpers ----
+
+
+def _form_submit_payload(message_id, btn_name, form_value):
+    """构造 schema 2.0 form_submit 回调 payload。"""
+    return {
+        "event": {
+            "context": {"open_message_id": message_id},
+            "action": {"name": btn_name, "form_value": form_value},
+        }
+    }
+
+
+def _form_outside_payload(message_id, action_id, **extra):
+    """构造 form 外按钮回调 payload。"""
+    value = {"action_id": action_id, **extra}
+    return {
+        "event": {
+            "context": {"open_message_id": message_id},
+            "action": {"value": value},
+        }
+    }
+
+
+@pytest.fixture()
+def fake_redis_card(monkeypatch):
+    """注入 fakeredis 到 card_registry（推卡存映射 + 反查共用）。"""
+    r = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr("app.core.card_registry.get_redis", lambda: r)
+    return r
+
+
+def _patch_session_locals(monkeypatch, db_session):
+    """统一 monkeypatch 各 service 的 SessionLocal（async 方法用独立 session）。"""
+    maker = sessionmaker(bind=db_session.bind, expire_on_commit=False)
+    for mod in (plan_app_svc, schedule_app_svc, daily_app_svc, task_app_svc, weekly_app_svc):
+        monkeypatch.setattr(mod, "SessionLocal", maker, raising=False)
+
+
+# ===== Block 1: 4 推卡入口 card_registry 映射（PR-D1 P1 回归）=====
+
+
+def test_phase_linking_mapping_handlers(db_session, fake_redis_card):
+    """on_phase_completed 推衔接卡后存映射 {type:phase_linking, phase_id}。"""
+    from app.supervisor.handlers import on_phase_completed
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
+    phases[0].status = "已完成"
+    goal.status = "进行中"
+    themes[0].status = "进行中"
+    db_session.flush()
+
+    with patch.object(FeishuClient, "send_card", return_value="om_pl") as mock_send:
+        on_phase_completed(
+            phases[0].id,
+            db=db_session,
+            feishu=FeishuClient(),
+            redis_client=fake_redis_card,
+        )
+    mock_send.assert_called_once()
+    ctx = get_card_context("om_pl", redis_client=fake_redis_card)
+    assert ctx is not None
+    assert ctx["type"] == "phase_linking"
+    assert ctx["phase_id"] == phases[1].id
+
+
+def test_phase_linking_mapping_scheduler(db_session, fake_redis_card):
+    """check_linking_unresponded 推衔接卡后存映射 {type:phase_linking, phase_id}。"""
+    from app.supervisor.event_bus import LINKING_PUSHED_KEY
+    from app.supervisor.scheduler import check_linking_unresponded
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
+    phases[0].status = "已完成"
+    phases[0].activated_at = _TODAY
+    goal.status = "进行中"
+    themes[0].status = "进行中"
+    db_session.flush()
+
+    # 模拟 24h 前推送过
+    key = LINKING_PUSHED_KEY.format(phase_id=phases[0].id)
+    fake_redis_card.set(key, "2026-07-05T00:00:00", ex=86400 * 2)
+
+    with patch.object(FeishuClient, "send_card", return_value="om_pl2"):
+        check_linking_unresponded(db_session, fake_redis_card, today=_TODAY, feishu=FeishuClient())
+
+    ctx = get_card_context("om_pl2", redis_client=fake_redis_card)
+    assert ctx is not None
+    assert ctx["type"] == "phase_linking"
+    assert ctx["phase_id"] == phases[1].id
+
+
+def test_push_daily_summary_card_mapping(db_session, fake_redis_card):
+    """DailyAppSvc.push_daily_summary_card -> send_card + 存映射 {type:daily_summary, daily_id}。"""
+    with patch.object(FeishuClient, "send_card", return_value="om_ds") as mock_send:
+        msg_id = DailyAppSvc(db_session).push_daily_summary_card(
+            daily_id="d1",
+            date_str="2026-07-06",
+            completed_tasks=[{"task_id": "t1", "name": "任务1"}],
+            incomplete_tasks=[{"task_id": "t2", "name": "任务2"}],
+            phase_health=[
+                {"name": "阶段1", "completed": 1, "total": 2, "status": "进行中", "rate": 0.5}
+            ],
+            chat_id="oc_test",
+        )
+    assert msg_id == "om_ds"
+    mock_send.assert_called_once()
+    ctx = get_card_context("om_ds", redis_client=fake_redis_card)
+    assert ctx == {"type": "daily_summary", "daily_id": "d1"}
+
+
+def test_push_task_complete_card_mapping(db_session, fake_redis_card):
+    """push_task_complete_card -> send_card + 存映射 {type:task_complete, workspace_id}。"""
+    with patch.object(FeishuClient, "send_card", return_value="om_tc") as mock_send:
+        msg_id = TaskAppSvc(db_session).push_task_complete_card(
+            workspace_id="ws1",
+            workspace_name="测试空间",
+            completed_tasks=[{"name": "任务1", "executor": "human"}],
+            pending_tasks=[{"id": "t2", "name": "任务2", "executor": "agent", "is_agent": True}],
+            chat_id="oc_test",
+        )
+    assert msg_id == "om_tc"
+    mock_send.assert_called_once()
+    ctx = get_card_context("om_tc", redis_client=fake_redis_card)
+    assert ctx == {"type": "task_complete", "workspace_id": "ws1"}
+
+
+def test_push_post_confirm_card_mapping(db_session, fake_redis_card):
+    """push_post_confirm_card -> send_card + 存映射 {type:post_confirm, task_id}。"""
+    with patch.object(FeishuClient, "send_card", return_value="om_pc") as mock_send:
+        msg_id = TaskAppSvc(db_session).push_post_confirm_card(
+            task_id="t1",
+            task_name="测试任务",
+            post_subtasks=[{"id": "p1", "name": "归档"}, {"id": "p2", "name": "更新题库"}],
+            chat_id="oc_test",
+        )
+    assert msg_id == "om_pc"
+    mock_send.assert_called_once()
+    ctx = get_card_context("om_pc", redis_client=fake_redis_card)
+    assert ctx["type"] == "post_confirm"
+    assert ctx["task_id"] == "t1"
+    assert len(ctx["post_subtasks"]) == 2
+
+
+def test_push_card_not_configured_no_mapping(db_session, fake_redis_card):
+    """send_card 返回 None（飞书未配置）-> 不存映射。"""
+    with patch.object(FeishuClient, "send_card", return_value=None):
+        msg_id = DailyAppSvc(db_session).push_daily_summary_card(
+            daily_id="d1",
+            date_str="2026-07-06",
+            completed_tasks=[],
+            incomplete_tasks=[],
+            phase_health=[],
+            chat_id="oc_test",
+        )
+    assert msg_id is None
+    assert get_card_context("om_ds", redis_client=fake_redis_card) is None
+
+
+# ===== Block 2: 全回调 update_card 补全（doc/09 §通用规则）=====
+
+
+def test_update_card_story1_confirm(client, db_session, monkeypatch):
+    """story1_确认方案 -> update_card 刷已确认态（§S1 确认后，绿色）。"""
+    _patch_session_locals(monkeypatch, db_session)
+    mock_confirm = patch.object(PlanAppSvc, "confirm")
+    mock_update = patch.object(FeishuClient, "update_card")
+    with mock_confirm as mc, mock_update as mu:
+        from app.schemas.plan import PlanConfirmData
+
+        mc.return_value = PlanConfirmData(
+            goal_id="g1",
+            goal_name="测试目标",
+            themes_created=2,
+            phases_created=3,
+            tasks_created=5,
+            draft_deleted=True,
+            h5_url="http://h5/plan/g1",
+        )
+        payload = _form_outside_payload("om_s1", "story1_确认方案", draft_id="d1")
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    msg_id, card = mu.call_args[0]
+    assert msg_id == "om_s1"
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_schedule_b_confirm(client, db_session, monkeypatch):
+    """confirm_btn schedule_b -> update_card 刷已确认态（§S2 状态3，绿色）。"""
+    goal, themes, _ = make_tree(db_session)
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload(
+            "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
+        )
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_daily_plan_confirm(client, db_session, monkeypatch):
+    """confirm_btn daily_plan -> update_card 刷已确认态（§S3 状态2，绿色）。"""
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=2)
+    phases[0].status = "进行中"
+    phases[0].activated_at = _TODAY
+    db_session.flush()
+    tasks = list(db_session.query(Task).filter_by(phase_id=phases[0].id))
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_plan", "date": "2026-07-06", "prerequisites": []},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload(
+            "om_s3", "confirm_btn", {f"task_{tasks[0].id}": True, f"task_{tasks[1].id}": False}
+        )
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_btn_pass(client, db_session, monkeypatch):
+    """btn_pass -> update_card 刷验收通过态（§S4A 场景1，绿色）。"""
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "verification", "task_id": tasks[0].id},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload("om_4a", "btn_pass", {})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_btn_reject_retry(client, db_session, monkeypatch):
+    """btn_reject retry -> update_card 刷反馈已下发态（§S4A 场景2，橙色）。"""
+    from app.models.agent_process import AgentProcess
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    tasks[0].retry_count = 0
+    ap = AgentProcess(id=str(uuid4()), workspace_id=ws.id, port=10001, status="running")
+    db_session.add(ap)
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "verification", "task_id": tasks[0].id},
+    )
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "dispatch_task"),
+        patch.object(task_app_svc, "set_task_timeout"),
+        patch.object(FeishuClient, "update_card") as mu,
+    ):
+        payload = _form_submit_payload("om_4a", "btn_reject", {"feedback": "加注释"})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "orange"
+
+
+def test_update_card_post_confirm(client, db_session, monkeypatch):
+    """confirm_btn post_confirm -> update_card 刷确认后中间态（§S4B 状态2，绿色）。"""
+    from tests.integration.test_story4b_tasks import _activate_and_get_task
+
+    goal, themes, phases, task = _activate_and_get_task(db_session)
+    task.status = "已完成"
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {
+            "type": "post_confirm",
+            "task_id": task.id,
+            "post_subtasks": [{"id": "p1", "name": "归档"}],
+        },
+    )
+    with (
+        patch.object(task_app_svc.OpenCodeClient, "dispatch_post_subtasks"),
+        patch.object(FeishuClient, "update_card") as mu,
+    ):
+        payload = _form_submit_payload("om_4b", "confirm_btn", {"post_p1": True})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_daily_summary(client, db_session, monkeypatch):
+    """confirm_btn daily_summary -> update_card 刷已确认态（§S5 状态2，绿色）。"""
+    from app.core import cascade
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    goal.status = "进行中"
+    themes[0].status = "进行中"
+    phases[0].status = "进行中"
+    phases[0].activated_at = _TODAY
+    db_session.flush()
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    task.status = "已完成"
+    cascade.cascade_status(db_session, "task", task.id)
+    db_session.flush()
+
+    daily = DailyRecord(id=str(uuid4()), date=_TODAY, week="2026-W27", push_source="manual")
+    db_session.add(daily)
+    db_session.add(DailyTask(id=str(uuid4()), daily_id=daily.id, task_id=task.id))
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
+    )
+    with (
+        patch.object(daily_app_svc, "write_daily_md"),
+        patch.object(FeishuClient, "update_card") as mu,
+    ):
+        payload = _form_submit_payload("om_s5", "confirm_btn", {f"task_{task.id}": True})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200, resp.text
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_task_complete(client, db_session, monkeypatch):
+    """confirm_btn task_complete -> update_card 刷确认完成已提交态（§S4A 场景4，绿色）。"""
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
+    )
+    with (
+        patch.object(TaskAppSvc, "confirm_complete") as mc,
+        patch.object(TaskAppSvc, "reassign_to_agent"),
+        patch.object(TaskAppSvc, "reassign_to_agent_async"),
+        patch.object(FeishuClient, "update_card") as mu,
+    ):
+        mc.return_value = {"task_id": tasks[1].id, "status": "已完成"}
+        payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{tasks[1].id}": True})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mc.assert_called_once()
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_btn_activate(client, db_session, monkeypatch):
+    """btn_activate -> update_card 刷已激活态（§S8 状态2，绿色）。"""
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
+    phases[0].status = "已完成"
+    goal.status = "进行中"
+    themes[0].status = "进行中"
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload("om_s8", "btn_activate", {"deadline": "2026-07-25 +0800"})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+def test_update_card_btn_defer(client, db_session, monkeypatch):
+    """btn_defer -> update_card 刷暂缓态（§S8 状态3，橙色）。"""
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
+    phases[0].status = "已完成"
+    goal.status = "进行中"
+    themes[0].status = "进行中"
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload("om_s8d", "btn_defer", {})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "orange"
+
+
+def test_update_card_story6_read(client, db_session, monkeypatch):
+    """story6_已阅周总结 -> update_card 刷已阅态（§S6 状态2，绿色）。"""
+    _patch_session_locals(monkeypatch, db_session)
+    with (
+        patch.object(weekly_app_svc, "write_weekly_md"),
+        patch.object(FeishuClient, "update_card") as mu,
+    ):
+        payload = _form_outside_payload("om_s6", "story6_已阅周总结", week="2026-W28")
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    assert card["header"]["template"] == "green"
+
+
+# ===== Block 3: reassign_to_agent 异步化（P2，3 秒超时）=====
+
+
+def test_reassign_to_agent_no_sync_start_agent_serve(db_session):
+    """reassign_to_agent 事务内只改 executor，不同步调 start_agent_serve（铁律 §3#4）。"""
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    task = tasks[0]
+    task.executor = "human"
+    db_session.flush()
+
+    with patch.object(task_app_svc.OpenCodeClient, "start_agent_serve") as mock_start:
+        result = TaskAppSvc(db_session).reassign_to_agent(task.id)
+
+    db_session.refresh(task)
+    assert task.executor == "agent"
+    assert result["reassigned"] is True
+    # 同步路径不调 start_agent_serve（改异步）
+    mock_start.assert_not_called()
+
+
+def test_reassign_to_agent_async_calls_start_agent_serve(db_session, monkeypatch):
+    """reassign_to_agent_async 异步调 start_agent_serve（BackgroundTasks）。"""
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    task = tasks[0]
+    task.executor = "agent"
+    db_session.flush()
+
+    monkeypatch.setattr(
+        task_app_svc,
+        "SessionLocal",
+        sessionmaker(bind=db_session.bind, expire_on_commit=False),
+    )
+    with patch.object(task_app_svc.OpenCodeClient, "start_agent_serve") as mock_start:
+        TaskAppSvc.reassign_to_agent_async(task.id)
+
+    mock_start.assert_called_once()
+
+
+def test_reassign_async_in_webhook(client, db_session, monkeypatch):
+    """confirm_btn task_complete 回调 reassign -> 事务内改 executor + 异步下发。"""
+    from tests.integration.test_story4a_agent import _make_full_tree
+
+    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
+    task1 = tasks[0]
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
+    )
+    with (
+        patch.object(TaskAppSvc, "confirm_complete") as mc,
+        patch.object(TaskAppSvc, "reassign_to_agent_async") as ma,
+        patch.object(FeishuClient, "update_card"),
+    ):
+        mc.return_value = {"task_id": "x", "status": "已完成"}
+        payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{task1.id}_reassign": True})
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    results = resp.json()["data"]["results"]
+    assert any(r["action"] == "reassigned" for r in results)
+    ma.assert_called_once_with(task1.id)
+
+
+# ===== Block 4: delete_session 已在 test_task_app_svc.py 覆盖 =====
+# test_trigger_reject_async_manual_intervention_path 断言 delete_session 被调
