@@ -525,3 +525,111 @@ def test_reassign_async_in_webhook(client, db_session, monkeypatch):
 
 # ===== Block 4: delete_session 已在 test_task_app_svc.py 覆盖 =====
 # test_trigger_reject_async_manual_intervention_path 断言 delete_session 被调
+
+
+# ===== P2-1: refresh_schedule_done_async h5_url 替换 =====
+
+
+def test_update_card_schedule_b_h5_url(client, db_session, monkeypatch):
+    """confirm_btn schedule_b -> update_card 终态卡含真实 h5_url（非 <h5_url> 占位符）。"""
+    goal, themes, _ = make_tree(db_session)
+    db_session.flush()
+    _patch_session_locals(monkeypatch, db_session)
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
+    )
+    monkeypatch.setattr("app.config.settings.h5_base_url", "http://h5test")
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_submit_payload(
+            "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
+        )
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    # 找含"前往配置页"的 markdown element
+    md_elements = [
+        e
+        for e in card["body"]["elements"]
+        if e.get("tag") == "markdown" and "前往配置页" in e.get("content", "")
+    ]
+    assert len(md_elements) == 1
+    content = md_elements[0]["content"]
+    # 不含字面量 <h5_url> 占位符
+    assert "<h5_url>" not in content
+    # 含真实 URL
+    assert "http://h5test" in content
+
+
+# ===== P2-2: S4B 全选/全不选 webhook 路由 =====
+
+
+def test_s4b_select_all(client, db_session, monkeypatch):
+    """story4B_全选 -> update_card 刷新所有 checker checked=true（保留按钮）。"""
+    _patch_session_locals(monkeypatch, db_session)
+    post_subs = [{"id": "p1", "name": "归档"}, {"id": "p2", "name": "更新题库"}]
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_outside_payload("om_4b", "story4B_全选", task_id="t1")
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "已全选"
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    # 卡片仍是 blue（非终态，保留按钮）
+    assert card["header"]["template"] == "blue"
+    # 所有 checker checked=true
+    form = card["body"]["elements"][1]
+    checkers = [e for e in form["elements"] if e.get("tag") == "checker"]
+    assert len(checkers) == 2
+    assert all(c["checked"] is True for c in checkers)
+
+
+def test_s4b_unselect_all(client, db_session, monkeypatch):
+    """story4B_全不选 -> update_card 刷新所有 checker checked=false（保留按钮）。"""
+    _patch_session_locals(monkeypatch, db_session)
+    post_subs = [{"id": "p1", "name": "归档"}, {"id": "p2", "name": "更新题库"}]
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    assert resp.json()["message"] == "已全不选"
+    mu.assert_called_once()
+    _, card = mu.call_args[0]
+    # 卡片仍是 blue（非终态，保留按钮）
+    assert card["header"]["template"] == "blue"
+    # 所有 checker checked=false
+    form = card["body"]["elements"][1]
+    checkers = [e for e in form["elements"] if e.get("tag") == "checker"]
+    assert len(checkers) == 2
+    assert all(c["checked"] is False for c in checkers)
+
+
+def test_s4b_select_all_retains_buttons(client, db_session, monkeypatch):
+    """全选/全不选后卡片保留全选/全不选/确认按钮（不提交 form）。"""
+    _patch_session_locals(monkeypatch, db_session)
+    post_subs = [{"id": "p1", "name": "归档"}]
+    monkeypatch.setattr(
+        "app.webhook.feishu_card.get_card_context",
+        lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
+    )
+    with patch.object(FeishuClient, "update_card") as mu:
+        payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
+        resp = client.post(_WEBHOOK, json=payload)
+    assert resp.status_code == 200
+    _, card = mu.call_args[0]
+    form = card["body"]["elements"][1]
+    # 确认按钮仍在
+    buttons = [e for e in form["elements"] if e.get("tag") == "button"]
+    assert any(b.get("name") == "confirm_btn" for b in buttons)
+    # 全选/全不选 column_set 仍在
+    col_sets = [e for e in form["elements"] if e.get("tag") == "column_set"]
+    assert len(col_sets) == 1

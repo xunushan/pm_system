@@ -1046,6 +1046,32 @@ class TaskAppSvc:
             db.close()
 
     @staticmethod
+    def refresh_post_confirm_toggle_async(
+        message_id: str, task_id: str, post_subtasks: list[dict], select_all: bool
+    ) -> None:
+        """事务后异步刷新后置确认卡（全选/全不选切换，doc/09 §S4B）。
+
+        全选/全不选按钮是 form 外按钮（behaviors callback），点击不提交 form，
+        Service 收到回调后重建 build_post_confirm_card（select_all=True/False）-> update_card
+        刷新所有 checker 的 checked 状态（保留按钮，doc/09 §S4B"用户点全不选后"）。
+
+        铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+
+        :param post_subtasks: 后置列表 [{id, name}, ...]（从 card_registry context 查）
+        :param select_all: True=全选（checked=true），False=全不选（checked=false）
+        """
+        db = SessionLocal()
+        try:
+            task = db.get(Task, task_id)
+            task_name = task.name if task else task_id
+            card = build_post_confirm_card(task_name, task_id, post_subtasks, select_all)
+            FeishuClient().update_card(message_id, card)
+        except Exception:
+            logger.exception("refresh_post_confirm_toggle_async 失败: task=%s", task_id)
+        finally:
+            db.close()
+
+    @staticmethod
     def refresh_task_complete_done_async(
         message_id: str, workspace_id: str, results: list[dict]
     ) -> None:

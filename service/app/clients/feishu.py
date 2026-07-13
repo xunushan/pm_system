@@ -1008,6 +1008,7 @@ def build_post_confirm_card(
     task_name: str,
     task_id: str,
     post_subtasks: list[dict],
+    select_all: bool | None = None,
 ) -> dict:
     """构建后置确认卡片（schema 2.0，doc/09 §S4B 状态1）。
 
@@ -1015,20 +1016,23 @@ def build_post_confirm_card(
     全选/全不选小按钮（form 外 behaviors callback，点了 Service update_card 刷新 checker）+
     确认按钮（form_submit，name=confirm_btn）。
 
-    后置属单个任务（保留 D23）。全不选+确认 = 无后置（铁律 §9 后置可全取消）。
-
     :param task_name: 任务名称
     :param task_id: 任务 ID（全选/全不选按钮回传）
     :param post_subtasks: 后置列表，每项含 ``id``/``name``
+    :param select_all: 全选/全不选切换。None=默认全选（初始推送），
+        True=全选（update_card 刷新），False=全不选（update_card 刷新）。
+        用于全选/全不选按钮点击后 Service 重建卡片刷新 checker 状态（doc/09 §S4B）。
     """
     form_elements: list[dict] = []
+    # select_all=None -> 默认全选（初始推送）；True/False -> 切换后重建（update_card 刷新）
+    checked = True if select_all is None else select_all
     for p in post_subtasks:
         form_elements.append(
             {
                 "tag": "checker",
                 "name": f"post_{p['id']}",
                 "text": {"tag": "plain_text", "content": p["name"]},
-                "checked": True,
+                "checked": checked,
             }
         )
     form_elements.append({"tag": "hr"})

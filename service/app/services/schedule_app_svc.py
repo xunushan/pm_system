@@ -356,7 +356,7 @@ class ScheduleAppSvc:
 
     @staticmethod
     def refresh_schedule_done_async(
-        message_id: str, goal_id: str, activated_phases: list[dict]
+        message_id: str, goal_id: str, activated_phases: list[dict], h5_url: str = ""
     ) -> None:
         """事务后异步刷新调度卡 B 到终态（独立 session，BackgroundTasks 调用）。
 
@@ -364,6 +364,7 @@ class ScheduleAppSvc:
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
 
         :param activated_phases: [{"phase_id": "...", "name": "...", "deadline": "2026-07-15"}, ...]
+        :param h5_url: H5 配置页链接（空则降级为纯文字提示，参考 build_schedule_card_a 模式）
         """
         db = SessionLocal()
         try:
@@ -390,12 +391,17 @@ class ScheduleAppSvc:
             for line in phase_lines:
                 elements.append({"tag": "div", "text": {"tag": "lark_md", "content": line}})
             elements.append({"tag": "hr"})
-            elements.append(
-                {
-                    "tag": "markdown",
-                    "content": "工作空间正在初始化。调整请[前往配置页](<h5_url>)",
-                }
-            )
+            if h5_url:
+                elements.append(
+                    {
+                        "tag": "markdown",
+                        "content": f"工作空间正在初始化。调整请[前往配置页]({h5_url})",
+                    }
+                )
+            else:
+                elements.append(
+                    {"tag": "markdown", "content": "工作空间正在初始化。调整请前往配置页"}
+                )
             card = build_done_card("🎯 调度已确认", "green", elements)
             FeishuClient().update_card(message_id, card)
         except Exception:

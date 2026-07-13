@@ -160,6 +160,37 @@ async def feishu_card_callback(
         link = f"{settings.h5_base_url}/board?phase_id={phase_id}"
         return {"code": 0, "message": "请前往页面调整", "data": {"link": link}}
 
+    # ---- S4B 全选/全不选（form 外按钮，doc/09 §S4B）----
+    # 点击不提交 form，Service update_card 刷新所有 checker checked 状态（保留按钮）
+
+    if action_id == "story4B_全选":
+        # 全选：update_card 把所有 checker checked=true（doc/09 §S4B"用户点全选后"）
+        task_id = action_value.get("task_id", "")
+        ctx = get_card_context(message_id)
+        post_subtasks = (ctx or {}).get("post_subtasks", [])
+        background_tasks.add_task(
+            TaskAppSvc.refresh_post_confirm_toggle_async,
+            message_id,
+            task_id,
+            post_subtasks,
+            True,
+        )
+        return {"code": 0, "message": "已全选", "data": {"task_id": task_id}}
+
+    if action_id == "story4B_全不选":
+        # 全不选：update_card 把所有 checker checked=false（doc/09 §S4B"用户点全不选后"）
+        task_id = action_value.get("task_id", "")
+        ctx = get_card_context(message_id)
+        post_subtasks = (ctx or {}).get("post_subtasks", [])
+        background_tasks.add_task(
+            TaskAppSvc.refresh_post_confirm_toggle_async,
+            message_id,
+            task_id,
+            post_subtasks,
+            False,
+        )
+        return {"code": 0, "message": "已全不选", "data": {"task_id": task_id}}
+
     # ===== form 内按钮路由（有 btn_name，无 action_id，doc/09 V8）=====
 
     if btn_name == "next_btn":
@@ -311,11 +342,15 @@ async def feishu_card_callback(
                 }
                 for ap in data.activated_phases
             ]
+            from app.config import settings
+
+            h5_url = f"{settings.h5_base_url}/board?goal_id={goal_id}"
             background_tasks.add_task(
                 ScheduleAppSvc.refresh_schedule_done_async,
                 message_id,
                 goal_id,
                 activated,
+                h5_url,
             )
             return ApiResponse(data=data).model_dump()
 
