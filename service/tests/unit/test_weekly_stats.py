@@ -262,3 +262,39 @@ def test_parse_week_valid():
     start, end = StatsAppSvc._parse_week("2026-W27")
     assert start == date(2026, 6, 29)
     assert end == date(2026, 7, 5)
+
+
+def test_get_weekly_stats_completed_tasks_aggregated(db_session):
+    """get_weekly_stats 返回本周已完成任务列表（按 completed_at 聚合到周）。
+
+    服务自己「日汇总到周」（铁律 §3#1 纯确定性逻辑）：completed_at 落在周内的已完成
+    任务 -> completed_tasks，含 date/task_name/executor/theme_name。
+    """
+    goal, themes, phases, tasks, daily = _setup_week(
+        db_session, tasks_per_phase=2, completed_count=1
+    )
+    # _setup_week 标 status=已完成 但未设 completed_at；补完成时间在周内 + executor
+    tasks[0].completed_at = _WEEK_DT
+    tasks[0].executor = "human"
+    db_session.flush()
+
+    data = StatsAppSvc(db_session).get_weekly_stats("u1", _WEEK)
+    assert len(data.completed_tasks) == 1
+    item = data.completed_tasks[0]
+    assert item.date == "2026-06-30"
+    assert item.task_name == tasks[0].name
+    assert item.executor == "human"
+    assert item.theme_name == themes[0].name
+
+
+def test_get_weekly_stats_completed_tasks_excludes_other_week(db_session):
+    """completed_at 不在本周的任务不进 completed_tasks（边界）。"""
+    goal, themes, phases, tasks, daily = _setup_week(
+        db_session, tasks_per_phase=1, completed_count=1
+    )
+    # completed_at 在 W28（2026-07-13），不在 W27
+    tasks[0].completed_at = datetime(2026, 7, 13, 9, 0, 0)
+    db_session.flush()
+
+    data = StatsAppSvc(db_session).get_weekly_stats("u1", _WEEK)
+    assert data.completed_tasks == []

@@ -196,3 +196,44 @@ def test_patch_to_card_b_async_no_pending_phases(client, db_session, monkeypatch
     with patch.object(FeishuClient, "update_card") as mock_update:
         ScheduleAppSvc.patch_to_card_b_async("om_patch", [themes[0].id], goal.id)
     mock_update.assert_not_called()
+
+
+# ===== WeeklyAppSvc.push_weekly_summary_card_from_db（服务自汇总日->周）=====
+
+
+def test_push_weekly_summary_card_from_db(db_session, fake_redis_card):
+    """push_weekly_summary_card_from_db 从 DB 汇总日->周推卡（服务自汇总，无 mock 数据）。
+
+    验证（铁律 §11 推卡全归 Service + §3#1 服务汇总）：调方只传 week + chat_id，
+    服务内部 get_weekly_stats 取本周完成任务 -> build_weekly_summary_card -> send_card -> 存映射。
+    """
+    from datetime import date, datetime
+
+    from app.models.task import Task
+
+    goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=1)
+    phases[0].status = "进行中"
+    phases[0].activated_at = date(2026, 6, 29)
+    task = db_session.query(Task).filter_by(phase_id=phases[0].id).one()
+    task.status = "已完成"
+    task.completed_at = datetime(2026, 6, 30, 9, 0, 0)
+    task.executor = "human"
+    db_session.flush()
+
+    with patch("app.services.weekly_app_svc.FeishuClient") as MockFeishu:
+        instance = MockFeishu.return_value
+        instance.send_card.return_value = "om_weekly_db"
+        msg_id = WeeklyAppSvc(db_session).push_weekly_summary_card_from_db(
+            week="2026-W27", chat_id="oc_test"
+        )
+    assert msg_id == "om_weekly_db"
+    instance.send_card.assert_called_once()
+    card = instance.send_card.call_args[0][1]
+    assert card["schema"] == "2.0"
+    # 卡片含本周完成任务（服务从 DB 汇总，非外部传入）
+    body_md = str(card["body"]["elements"])
+    assert task.name in body_md
+    assert "[人]" in body_md  # executor=human -> [人] 标签
+    # 映射存储
+    ctx = get_card_context("om_weekly_db", redis_client=fake_redis_card)
+    assert ctx == {"type": "weekly_summary", "week": "2026-W27"}
