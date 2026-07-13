@@ -317,10 +317,8 @@ def test_webhook_post_confirm_inserts(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["post_subtask_count"] == 1
-    assert data["async_triggered"] is True
+    # 方案 B：同步返回 toast + card（已确认后置）
+    assert resp.json()["toast"]["content"] == "已确认后置"
     assert len(dispatch_calls) == 1
 
 
@@ -344,9 +342,8 @@ def test_webhook_no_post_all_cancelled(client, db_session, monkeypatch):
     resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200
-    data = resp.json()["data"]
-    assert data["post_subtask_count"] == 0
-    assert data["async_triggered"] is False
+    # 方案 B：同步返回 toast + card（已确认后置，无后置收尾）
+    assert resp.json()["toast"]["content"] == "已确认后置"
     assert db_session.query(Subtask).filter_by(task_id=task.id).count() == 0
 
 

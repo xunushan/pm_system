@@ -191,6 +191,34 @@ class PlanAppSvc:
         self.task_repo.create(task)
         return task
 
+    # ---- 终态卡片构建（纯函数，供 webhook 同步返回 + refresh 异步刷新共用）----
+
+    @staticmethod
+    def build_overview_done_card(
+        goal_name: str,
+        theme_count: int,
+        phase_count: int,
+        task_count: int,
+        h5_url: str,
+    ) -> dict:
+        """构建方案总览已确认终态卡片（纯函数，doc/09 §S1 确认后）。
+
+        绿色标题 + "✅ 方案已确认" + H5 链接，无按钮。
+        供 webhook 同步返回（方案 B）+ refresh_overview_done_async 异步刷新共用。
+        """
+        link = f"[前往配置页调整]({h5_url})" if h5_url else "前往配置页调整"
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**目标：{goal_name}**\n\n"
+                    f"专题数：{theme_count} / 阶段数：{phase_count} / 任务数：{task_count}\n\n"
+                    f"✅ **方案已确认，已正式建库**\n\n{link}"
+                ),
+            }
+        ]
+        return build_done_card("📋 方案总览", "green", elements)
+
     # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
 
     @staticmethod
@@ -206,19 +234,11 @@ class PlanAppSvc:
 
         §S1 确认后：绿色，"✅ 方案已确认" + 去按钮 + H5 链接（doc/09 §S1 确认后）。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
-        link = f"[前往配置页调整]({h5_url})" if h5_url else "前往配置页调整"
-        elements = [
-            {
-                "tag": "markdown",
-                "content": (
-                    f"**目标：{goal_name}**\n\n"
-                    f"专题数：{theme_count} / 阶段数：{phase_count} / 任务数：{task_count}\n\n"
-                    f"✅ **方案已确认，已正式建库**\n\n{link}"
-                ),
-            }
-        ]
-        card = build_done_card("📋 方案总览", "green", elements)
+        card = PlanAppSvc.build_overview_done_card(
+            goal_name, theme_count, phase_count, task_count, h5_url
+        )
         try:
             FeishuClient().update_card(message_id, card)
         except Exception:

@@ -183,8 +183,8 @@ def test_webhook_story8_confirm_activate(client, db_session, monkeypatch):
     }
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    data = resp.json()["data"]
-    assert data["status"] == "进行中"
+    # 方案 B：同步返回 toast + card（已激活态）
+    assert resp.json()["toast"]["content"] == "已激活"
 
     db_session.expire_all()
     assert phases[1].status == "进行中"
@@ -208,7 +208,8 @@ def test_webhook_story8_skip_activate(client, db_session, monkeypatch):
     }
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card（已暂缓态）
+    assert resp.json()["toast"]["content"] == "已暂缓"
     # phase 状态不变
     db_session.expire_all()
     assert phases[1].status == "未开始"

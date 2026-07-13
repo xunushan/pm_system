@@ -357,7 +357,8 @@ def test_webhook_story3_confirm(client, db_session, monkeypatch):
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card
+    assert resp.json()["toast"]["content"] == "今日计划已确认"
 
     # DB 验证
     assert db_session.query(DailyRecord).count() == 1

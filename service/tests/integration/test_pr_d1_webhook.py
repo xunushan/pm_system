@@ -78,7 +78,8 @@ def test_checker_parse_s3_task_and_pre(client, db_session, monkeypatch):
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card
+    assert resp.json()["toast"]["content"] == "今日计划已确认"
 
     # 只勾选了 task_0
     assert db_session.query(DailyTask).count() == 1
@@ -120,7 +121,11 @@ def test_checker_parse_s4b_post(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200
-    assert resp.json()["data"]["post_subtask_count"] == 1
+    # 方案 B：同步返回 toast + card（post_subtask_count=1 -> 有后置）
+    assert resp.json()["toast"]["content"] == "已确认后置"
+    card = resp.json()["card"]["data"]
+    assert card["header"]["template"] == "green"
+    assert "后置已确认" in card["body"]["elements"][0]["content"]
 
 
 def test_checker_parse_s5_status_revert(client, db_session, monkeypatch):
@@ -182,7 +187,8 @@ def test_date_picker_parse_s2_deadline(client, db_session, monkeypatch):
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card
+    assert resp.json()["toast"]["content"] == "调度已确认"
 
     phase = db_session.query(Phase).filter_by(status="进行中").one()
     assert phase.deadline == date(2026, 7, 15)
@@ -255,7 +261,8 @@ def test_input_parse_s4a_feedback(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["action"] == "retry"
+    # 方案 B：retry 路径同步返回 toast + card（橙色反馈已下发态）
+    assert resp.json()["toast"]["content"] == "已下发修改"
     assert task.retry_count == 1
 
 
@@ -347,10 +354,8 @@ def test_reassign_mutual_exclusion(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    results = resp.json()["data"]["results"]
-    actions = {r["task_id"]: r["action"] for r in results}
-    assert actions[task1.id] == "reassigned"
-    assert actions[task2.id] == "completed"
+    # 方案 B：同步返回 toast + card（确认完成已提交）
+    assert resp.json()["toast"]["content"] == "确认完成已提交"
     # confirm_complete 只对 task2 调用（不含 task1）
     mock_complete.assert_called_once_with(task2.id, "feishu_user")
     # reassign 只对 task1 调用
@@ -382,9 +387,8 @@ def test_reassign_only(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200
-    results = resp.json()["data"]["results"]
-    assert len(results) == 1
-    assert results[0]["action"] == "reassigned"
+    # 方案 B：同步返回 toast + card（确认完成已提交）
+    assert resp.json()["toast"]["content"] == "确认完成已提交"
     mock_complete.assert_not_called()
 
 
