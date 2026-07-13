@@ -17,7 +17,9 @@ form_submit 按钮无 task_id/daily_id 等业务 ID（doc/09 V1），靠 message
 card_registry（PR-C 落地）。confirm_btn 在多张卡片复用，靠 card_registry type 分发。
 
 飞书 3 秒超时（铁律 §3#4）：回调仅做 DB 写 + 即时级联（<200ms）后立即返回；
-耗时操作（工作空间初始化、opencode 执行、刷卡片、写 daily.md）事务提交后异步（BackgroundTasks）。
+卡片刷新在回调响应体同步返回（方案 B：card.data 传终态卡片 JSON，飞书立即更新）；
+耗时副作用（工作空间初始化、opencode 执行、写 daily.md/weekly.md）
+事务提交后异步（BackgroundTasks）。
 """
 
 import logging
@@ -27,7 +29,7 @@ from typing import Annotated
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy.orm import Session
 
-from app.core.card_registry import get_card_context
+from app.core.card_registry import get_card_context, set_card_context
 from app.db.session import get_db
 from app.schemas.common import ApiResponse
 from app.schemas.daily import PreSubtaskInput
@@ -116,17 +118,18 @@ async def feishu_card_callback(
         if not draft_id:
             return {"code": 1002, "message": "回调缺少 draft_id", "data": None}
         data = PlanAppSvc(db).confirm(draft_id)
-        # 事务后异步：update_card 刷已确认态（doc/09 §S1 确认后）
-        background_tasks.add_task(
-            PlanAppSvc.refresh_overview_done_async,
-            message_id,
+        # 同步返回终态卡片（方案 B）：绿色已确认态（doc/09 §S1 确认后）
+        card = PlanAppSvc.build_overview_done_card(
             data.goal_name,
             data.themes_created,
             data.phases_created,
             data.tasks_created,
             data.h5_url,
         )
-        return ApiResponse(data=data).model_dump()
+        return {
+            "toast": {"type": "success", "content": "方案已确认"},
+            "card": {"type": "raw", "data": card},
+        }
 
     if action_id == "story6_已阅周总结":
         # S6 周总结已阅（form 外，doc/09 §S6）：action_id + week 回传
@@ -137,9 +140,12 @@ async def feishu_card_callback(
         data = WeeklyAppSvc(db).confirm_summary(week)
         # 事务后异步：写 weekly.md 快照（3 秒超时内不阻塞）
         background_tasks.add_task(WeeklyAppSvc.write_weekly_md_async, week)
-        # 事务后异步：update_card 刷已阅态（doc/09 §S6 状态2）
-        background_tasks.add_task(WeeklyAppSvc.refresh_weekly_done_async, message_id, week)
-        return ApiResponse(data=data).model_dump()
+        # 同步返回终态卡片（方案 B）：绿色已阅态（doc/09 §S6 状态2）
+        card = WeeklyAppSvc.build_weekly_done_card_from_db(db, week)
+        return {
+            "toast": {"type": "success", "content": "已阅"},
+            "card": {"type": "raw", "data": card},
+        }
 
     if action_id == "story8_去激活":
         # S8 去激活（form 外，build_theme_completed_card / build_start_date_reminder_card）
@@ -164,32 +170,26 @@ async def feishu_card_callback(
     # 点击不提交 form，Service update_card 刷新所有 checker checked 状态（保留按钮）
 
     if action_id == "story4B_全选":
-        # 全选：update_card 把所有 checker checked=true（doc/09 §S4B"用户点全选后"）
+        # 全选：同步返回刷新所有 checker checked=true（doc/09 §S4B"用户点全选后"）
         task_id = action_value.get("task_id", "")
         ctx = get_card_context(message_id)
         post_subtasks = (ctx or {}).get("post_subtasks", [])
-        background_tasks.add_task(
-            TaskAppSvc.refresh_post_confirm_toggle_async,
-            message_id,
-            task_id,
-            post_subtasks,
-            True,
-        )
-        return {"code": 0, "message": "已全选", "data": {"task_id": task_id}}
+        card = TaskAppSvc.build_post_confirm_toggle_card_from_db(db, task_id, post_subtasks, True)
+        return {
+            "toast": {"type": "success", "content": "已全选"},
+            "card": {"type": "raw", "data": card},
+        }
 
     if action_id == "story4B_全不选":
-        # 全不选：update_card 把所有 checker checked=false（doc/09 §S4B"用户点全不选后"）
+        # 全不选：同步返回刷新所有 checker checked=false（doc/09 §S4B"用户点全不选后"）
         task_id = action_value.get("task_id", "")
         ctx = get_card_context(message_id)
         post_subtasks = (ctx or {}).get("post_subtasks", [])
-        background_tasks.add_task(
-            TaskAppSvc.refresh_post_confirm_toggle_async,
-            message_id,
-            task_id,
-            post_subtasks,
-            False,
-        )
-        return {"code": 0, "message": "已全不选", "data": {"task_id": task_id}}
+        card = TaskAppSvc.build_post_confirm_toggle_card_from_db(db, task_id, post_subtasks, False)
+        return {
+            "toast": {"type": "success", "content": "已全不选"},
+            "card": {"type": "raw", "data": card},
+        }
 
     # ===== form 内按钮路由（有 btn_name，无 action_id，doc/09 V8）=====
 
@@ -202,11 +202,16 @@ async def feishu_card_callback(
         # message_id 反查 goal_id（P2 路由缺口，card_registry）
         ctx = get_card_context(message_id)
         goal_id = (ctx or {}).get("goal_id", "")
-        # 事务后异步：update_card patch 卡片 A -> B（build_schedule_card_b，传选中 phases）
-        background_tasks.add_task(
-            ScheduleAppSvc.patch_to_card_b_async, message_id, selected_theme_ids, goal_id
-        )
-        return {"code": 0, "message": "正在生成卡片 B", "data": {"goal_id": goal_id}}
+        # 同步返回卡片 B（方案 B）：查选中专题的第1个未开始阶段 -> build_schedule_card_b
+        card = ScheduleAppSvc.build_schedule_card_b_from_db(db, selected_theme_ids, goal_id)
+        if card is None:
+            return {"code": 1002, "message": "选中专题无可激活阶段", "data": None}
+        # 更新 card_registry 类型 schedule_a -> schedule_b（供 confirm_btn 回调区分）
+        set_card_context(message_id, {"type": "schedule_b", "goal_id": goal_id})
+        return {
+            "toast": {"type": "info", "content": "请填 deadline"},
+            "card": {"type": "raw", "data": card},
+        }
 
     # ---- S4A 验收卡：btn_pass / btn_reject（doc/09 §S4A 场景1）----
 
@@ -220,11 +225,12 @@ async def feishu_card_callback(
         task_id = ctx["task_id"]
         # 事务内：UPDATE task 已完成 + 即时级联 + 审计（<200ms）；立即返回
         data = TaskAppSvc(db).output_confirm(task_id, _DEFAULT_USER_ID, [])
-        # 事务后异步：update_card 刷验收通过态（doc/09 §S4A 场景1 点验收通过后）
-        background_tasks.add_task(
-            TaskAppSvc.refresh_verification_done_async, message_id, task_id, True
-        )
-        return ApiResponse(data=data).model_dump()
+        # 同步返回终态卡片（方案 B）：绿色验收通过态（doc/09 §S4A 场景1 点验收通过后）
+        card = TaskAppSvc.build_verification_done_card_from_db(db, task_id, True)
+        return {
+            "toast": {"type": "success", "content": "验收通过"},
+            "card": {"type": "raw", "data": card},
+        }
 
     if btn_name == "btn_reject":
         # S4A 需要修改（form_submit，doc/09 §S4A 场景1->2）
@@ -242,16 +248,14 @@ async def feishu_card_callback(
         data = TaskAppSvc(db).output_reject(task_id, _DEFAULT_USER_ID, feedback)
         # 事务后异步：retry 的 dispatch_task + manual_intervention 的 delete_session（D26）
         background_tasks.add_task(TaskAppSvc.trigger_reject_async, task_id, feedback)
-        # 事务后异步：update_card 刷反馈已下发态（doc/09 §S4A 场景2 点需要修改后）
-        # 仅 retry 路径刷反馈态；manual_intervention 路径（3 次不通过）推人工接手卡（不更新原卡）
+        # retry 路径：同步返回终态卡片（方案 B）：橙色反馈已下发态（doc/09 §S4A 场景2）
+        # manual_intervention 路径（3 次不通过）推人工接手卡（不更新原卡），保持原逻辑
         if data.action == "retry":
-            background_tasks.add_task(
-                TaskAppSvc.refresh_verification_done_async,
-                message_id,
-                task_id,
-                False,
-                feedback,
-            )
+            card = TaskAppSvc.build_verification_done_card_from_db(db, task_id, False, feedback)
+            return {
+                "toast": {"type": "success", "content": "已下发修改"},
+                "card": {"type": "raw", "data": card},
+            }
         return ApiResponse(data=data).model_dump()
 
     # ---- S8 衔接卡：btn_activate / btn_defer（doc/09 §S8）----
@@ -273,14 +277,14 @@ async def feishu_card_callback(
         # 事务后异步：managed=1 工作空间初始化（3 秒超时内不阻塞）
         if data.workspace_managed and data.workspace_status == "未初始化":
             background_tasks.add_task(WorkspaceAppSvc.init, data.workspace_id)
-        # 事务后异步：update_card 刷已激活态（doc/09 §S8 状态2）
-        background_tasks.add_task(
-            ScheduleAppSvc.refresh_activate_done_async,
-            message_id,
-            data.name,
-            data.deadline.isoformat() if data.deadline else "",
+        # 同步返回终态卡片（方案 B）：绿色已激活态（doc/09 §S8 状态2）
+        card = ScheduleAppSvc.build_activate_done_card(
+            data.name, data.deadline.isoformat() if data.deadline else ""
         )
-        return ApiResponse(data=data).model_dump()
+        return {
+            "toast": {"type": "success", "content": "已激活"},
+            "card": {"type": "raw", "data": card},
+        }
 
     if btn_name == "btn_defer":
         # S8 暂不激活（form_submit，doc/09 §S8 状态1->3）
@@ -289,9 +293,12 @@ async def feishu_card_callback(
         phase_id = (ctx or {}).get("phase_id", "")
         # 记录暂缓：不激活，24h 后巡检再提醒（doc/06 表2 story8_暂不激活）
         logger.info("btn_defer: phase=%s 用户选择暂不激活，24h 后巡检再提醒", phase_id)
-        # 事务后异步：update_card 刷暂缓态（doc/09 §S8 状态3）
-        background_tasks.add_task(ScheduleAppSvc.refresh_defer_done_async, message_id, phase_id)
-        return {"code": 0, "message": "已记录，24h 后再提醒", "data": {"phase_id": phase_id}}
+        # 同步返回终态卡片（方案 B）：橙色暂缓态（doc/09 §S8 状态3）
+        card = ScheduleAppSvc.build_defer_done_card_from_db(db, phase_id)
+        return {
+            "toast": {"type": "info", "content": "已暂缓"},
+            "card": {"type": "raw", "data": card},
+        }
 
     # ---- confirm_btn（多卡复用，靠 card_registry type 分发）----
 
@@ -333,7 +340,7 @@ async def feishu_card_callback(
             for ap in data.activated_phases:
                 if ap.workspace_managed:
                     background_tasks.add_task(WorkspaceAppSvc.init, ap.workspace_id)
-            # 事务后异步：update_card 刷已确认态（doc/09 §S2 状态3）
+            # 同步返回终态卡片（方案 B）：绿色已确认态（doc/09 §S2 状态3）
             activated = [
                 {
                     "phase_id": ap.phase_id,
@@ -345,14 +352,11 @@ async def feishu_card_callback(
             from app.config import settings
 
             h5_url = f"{settings.h5_base_url}/board?goal_id={goal_id}"
-            background_tasks.add_task(
-                ScheduleAppSvc.refresh_schedule_done_async,
-                message_id,
-                goal_id,
-                activated,
-                h5_url,
-            )
-            return ApiResponse(data=data).model_dump()
+            card = ScheduleAppSvc.build_schedule_done_card_from_db(db, goal_id, activated, h5_url)
+            return {
+                "toast": {"type": "success", "content": "调度已确认"},
+                "card": {"type": "raw", "data": card},
+            }
 
         # S3 确认今日计划（doc/09 §S3 状态1->2）
         if card_type == "daily_plan":
@@ -384,11 +388,14 @@ async def feishu_card_callback(
             # 事务后异步：opencode 执行前置 + 启动智能体 serve（3 秒超时内不阻塞）
             if data.async_triggered:
                 background_tasks.add_task(DailyAppSvc.trigger_async, data.daily_id)
-            # 事务后异步：update_card 刷已确认态（doc/09 §S3 状态2）
-            background_tasks.add_task(
-                DailyAppSvc.refresh_daily_plan_done_async, message_id, data.daily_id
-            )
-            return ApiResponse(data=data).model_dump()
+            # 同步返回终态卡片（方案 B）：绿色已确认态（doc/09 §S3 状态2）
+            card = DailyAppSvc.build_daily_plan_done_card_from_db(db, data.daily_id)
+            if card is None:
+                return {"code": 1002, "message": "daily 记录不存在", "data": None}
+            return {
+                "toast": {"type": "success", "content": "今日计划已确认"},
+                "card": {"type": "raw", "data": card},
+            }
 
         # S4B 确认后置（doc/09 §S4B 状态1->2）
         if card_type == "post_confirm":
@@ -407,14 +414,14 @@ async def feishu_card_callback(
             # 事务后异步：opencode run 执行后置（3 秒超时内不阻塞）
             if data.async_triggered:
                 background_tasks.add_task(TaskAppSvc.trigger_post_async, task_id)
-            # 事务后异步：update_card 刷确认后中间态（doc/09 §S4B 状态2）
-            background_tasks.add_task(
-                TaskAppSvc.refresh_post_confirm_done_async,
-                message_id,
-                task_id,
-                data.post_subtask_count > 0,
+            # 同步返回终态卡片（方案 B）：绿色确认后中间态（doc/09 §S4B 状态2）
+            card = TaskAppSvc.build_post_confirm_done_card_from_db(
+                db, task_id, data.post_subtask_count > 0
             )
-            return ApiResponse(data=data).model_dump()
+            return {
+                "toast": {"type": "success", "content": "已确认后置"},
+                "card": {"type": "raw", "data": card},
+            }
 
         # S5 确认日终总结（doc/09 §S5 状态1->2）
         if card_type == "daily_summary":
@@ -444,9 +451,14 @@ async def feishu_card_callback(
             data = DailyAppSvc(db).confirm_summary(daily_id)
             # 事务后异步：写 daily.md 快照（3 秒超时内不阻塞）
             background_tasks.add_task(DailyAppSvc.write_daily_md_async, daily_id)
-            # 事务后异步：update_card 刷已确认态（doc/09 §S5 状态2）
-            background_tasks.add_task(DailyAppSvc.refresh_summary_done_async, message_id, daily_id)
-            return ApiResponse(data=data).model_dump()
+            # 同步返回终态卡片（方案 B）：绿色已确认态（doc/09 §S5 状态2）
+            card = DailyAppSvc.build_summary_done_card_from_db(db, daily_id)
+            if card is None:
+                return {"code": 1002, "message": "daily 记录不存在", "data": None}
+            return {
+                "toast": {"type": "success", "content": "日终总结已确认"},
+                "card": {"type": "raw", "data": card},
+            }
 
         # S4A 场景4 确认完成（doc/09 §S4A 场景4）
         if card_type == "task_complete":
@@ -477,15 +489,13 @@ async def feishu_card_callback(
                 results.append({"task_id": tid, "action": "reassigned"})
                 # 事务后异步：start_agent_serve（IO，BackgroundTasks）
                 background_tasks.add_task(TaskAppSvc.reassign_to_agent_async, tid)
-            # 事务后异步：update_card 刷确认完成已提交态（doc/09 §S4A 场景4 点确认完成后）
+            # 同步返回终态卡片（方案 B）：绿色确认完成已提交态（doc/09 §S4A 场景4 点确认完成后）
             workspace_id = ctx.get("workspace_id", "")
-            background_tasks.add_task(
-                TaskAppSvc.refresh_task_complete_done_async,
-                message_id,
-                workspace_id,
-                results,
-            )
-            return {"code": 0, "message": "确认完成已提交", "data": {"results": results}}
+            card = TaskAppSvc.build_task_complete_done_card_from_db(db, workspace_id, results)
+            return {
+                "toast": {"type": "success", "content": "确认完成已提交"},
+                "card": {"type": "raw", "data": card},
+            }
 
         # 未知 card_type
         logger.warning("confirm_btn: 未知卡片类型 %s, message_id=%s", card_type, message_id)

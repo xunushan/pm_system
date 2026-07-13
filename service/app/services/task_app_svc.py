@@ -958,6 +958,149 @@ class TaskAppSvc:
             )
         return message_id
 
+    # ---- 终态卡片构建（纯函数 + _from_db 供 webhook 同步返回）----
+
+    @staticmethod
+    def build_verification_done_card(
+        task_name: str, file_list: str, passed: bool, feedback: str = ""
+    ) -> dict:
+        """构建验收卡终态卡片（纯函数，doc/09 §S4A 场景1/2）。
+
+        - passed=True -> 绿色，"✅ 验收通过，任务已完成"
+        - passed=False -> 橙色，"✅ 反馈已下发智能体"
+        """
+        if passed:
+            elements = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**任务：{task_name}**\n\n"
+                        "✅ **验收通过，任务已完成**\n\n"
+                        f"**产出文件：**\n{file_list}"
+                    ),
+                }
+            ]
+            return build_done_card("✅ 验收通过", "green", elements)
+        else:
+            elements = [
+                {
+                    "tag": "markdown",
+                    "content": (
+                        f"**任务：{task_name}**\n\n"
+                        "✅ **你的反馈已下发智能体，等待其调整产出**\n\n"
+                        f"**你的反馈：**\n> {feedback}\n\n"
+                        f"产出文件：\n{file_list}"
+                    ),
+                }
+            ]
+            return build_done_card("⚠️ 反馈已下发", "orange", elements)
+
+    @staticmethod
+    def build_verification_done_card_from_db(
+        db: Session, task_id: str, passed: bool, feedback: str = ""
+    ) -> dict:
+        """查询 DB + 构建验收卡终态卡片（供 webhook 同步调用）。"""
+        task = db.get(Task, task_id)
+        task_name = task.name if task else task_id
+        file_paths = [
+            wp.file_path
+            for wp in db.execute(
+                select(WorkspaceProgress.file_path).where(WorkspaceProgress.task_id == task_id)
+            ).all()
+        ]
+        file_list = "\n".join(f"· {fp}" for fp in file_paths) or "（无产出文件）"
+        return TaskAppSvc.build_verification_done_card(task_name, file_list, passed, feedback)
+
+    @staticmethod
+    def build_post_confirm_done_card(task_name: str, has_post: bool) -> dict:
+        """构建后置确认卡终态卡片（纯函数，doc/09 §S4B 状态2）。
+
+        - has_post=True -> 绿色，"后置工作已启动，完成后通知你"
+        - has_post=False -> 绿色，"无后置子任务执行"
+        """
+        if has_post:
+            content = (
+                f"**任务：{task_name}**\n\n✅ **后置已确认**\n\n后置工作已启动，完成后通知你。"
+            )
+        else:
+            content = (
+                f"**任务：{task_name}**\n\n"
+                "✅ **后置已确认（无后置收尾）**\n\n"
+                "任务保持已完成状态，无后置子任务执行。"
+            )
+        elements = [{"tag": "markdown", "content": content}]
+        return build_done_card("✅ 任务已完成", "green", elements)
+
+    @staticmethod
+    def build_post_confirm_done_card_from_db(db: Session, task_id: str, has_post: bool) -> dict:
+        """查询 DB + 构建后置确认卡终态卡片（供 webhook 同步调用）。"""
+        task = db.get(Task, task_id)
+        task_name = task.name if task else task_id
+        return TaskAppSvc.build_post_confirm_done_card(task_name, has_post)
+
+    @staticmethod
+    def build_post_confirm_toggle_card_from_db(
+        db: Session, task_id: str, post_subtasks: list[dict], select_all: bool
+    ) -> dict:
+        """查询 DB + 构建后置确认卡（全选/全不选切换，供 webhook 同步调用）。
+
+        复用 build_post_confirm_card（feishu.py），查 task_name 后组装。
+        全选/全不选不提交 form，只刷新 checker checked 状态（保留按钮，doc/09 §S4B）。
+        """
+        task = db.get(Task, task_id)
+        task_name = task.name if task else task_id
+        return build_post_confirm_card(task_name, task_id, post_subtasks, select_all)
+
+    @staticmethod
+    def build_task_complete_done_card(
+        workspace_name: str, task_list: str, has_reassign: bool
+    ) -> dict:
+        """构建确认完成已提交终态卡片（纯函数，doc/09 §S4A 场景4）。
+
+        绿色标题 + "✅ 确认完成已提交" + 完成任务列表 + reassign 提示。
+        """
+        reassign_note = ""
+        if has_reassign:
+            reassign_note = "\n\n已重新下发改交智能体的任务。"
+
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"✅ **确认完成已提交**\n\n"
+                    f"**工作空间：{workspace_name}**\n\n"
+                    f"**本批确认完成的任务：**"
+                ),
+            },
+            {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
+            {"tag": "hr"},
+            {"tag": "markdown", "content": f"系统已记录。{reassign_note}"},
+        ]
+        return build_done_card("确认完成已提交", "green", elements)
+
+    @staticmethod
+    def build_task_complete_done_card_from_db(
+        db: Session, workspace_id: str, results: list[dict]
+    ) -> dict:
+        """查询 DB + 构建确认完成已提交终态卡片（供 webhook 同步调用）。
+
+        :param results: [{"task_id": "...", "action": "completed"/"reassigned"}, ...]
+        """
+        ws = db.get(Workspace, workspace_id)
+        workspace_name = ws.path if ws else workspace_id
+        completed_lines = []
+        has_reassign = False
+        for r in results:
+            task = db.get(Task, r["task_id"])
+            task_name = task.name if task else r["task_id"]
+            executor = task.executor if task else "?"
+            tag = {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
+            if r["action"] == "reassigned":
+                has_reassign = True
+            completed_lines.append(f"· {task_name} {tag} - 已完成")
+        task_list = "\n".join(completed_lines) or "· （无）"
+        return TaskAppSvc.build_task_complete_done_card(workspace_name, task_list, has_reassign)
+
     # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
 
     @staticmethod
@@ -970,44 +1113,11 @@ class TaskAppSvc:
         - passed=False -> §S4A 场景2 反馈已下发：橙色，"✅ 反馈已下发智能体"
 
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            task = db.get(Task, task_id)
-            task_name = task.name if task else task_id
-            file_paths = [
-                wp.file_path
-                for wp in db.execute(
-                    select(WorkspaceProgress.file_path).where(WorkspaceProgress.task_id == task_id)
-                ).all()
-            ]
-            file_list = "\n".join(f"· {fp}" for fp in file_paths) or "（无产出文件）"
-
-            if passed:
-                elements = [
-                    {
-                        "tag": "markdown",
-                        "content": (
-                            f"**任务：{task_name}**\n\n"
-                            "✅ **验收通过，任务已完成**\n\n"
-                            f"**产出文件：**\n{file_list}"
-                        ),
-                    }
-                ]
-                card = build_done_card("✅ 验收通过", "green", elements)
-            else:
-                elements = [
-                    {
-                        "tag": "markdown",
-                        "content": (
-                            f"**任务：{task_name}**\n\n"
-                            "✅ **你的反馈已下发智能体，等待其调整产出**\n\n"
-                            f"**你的反馈：**\n> {feedback}\n\n"
-                            f"产出文件：\n{file_list}"
-                        ),
-                    }
-                ]
-                card = build_done_card("⚠️ 反馈已下发", "orange", elements)
+            card = TaskAppSvc.build_verification_done_card_from_db(db, task_id, passed, feedback)
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_verification_done_async 失败: task=%s", task_id)
@@ -1022,23 +1132,11 @@ class TaskAppSvc:
         - has_post=False -> §S4B 无后置（全不选）：绿色，"无后置子任务执行"
 
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            task = db.get(Task, task_id)
-            task_name = task.name if task else task_id
-            if has_post:
-                content = (
-                    f"**任务：{task_name}**\n\n✅ **后置已确认**\n\n后置工作已启动，完成后通知你。"
-                )
-            else:
-                content = (
-                    f"**任务：{task_name}**\n\n"
-                    "✅ **后置已确认（无后置收尾）**\n\n"
-                    "任务保持已完成状态，无后置子任务执行。"
-                )
-            elements = [{"tag": "markdown", "content": content}]
-            card = build_done_card("✅ 任务已完成", "green", elements)
+            card = TaskAppSvc.build_post_confirm_done_card_from_db(db, task_id, has_post)
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_post_confirm_done_async 失败: task=%s", task_id)
@@ -1056,15 +1154,16 @@ class TaskAppSvc:
         刷新所有 checker 的 checked 状态（保留按钮，doc/09 §S4B"用户点全不选后"）。
 
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
 
         :param post_subtasks: 后置列表 [{id, name}, ...]（从 card_registry context 查）
         :param select_all: True=全选（checked=true），False=全不选（checked=false）
         """
         db = SessionLocal()
         try:
-            task = db.get(Task, task_id)
-            task_name = task.name if task else task_id
-            card = build_post_confirm_card(task_name, task_id, post_subtasks, select_all)
+            card = TaskAppSvc.build_post_confirm_toggle_card_from_db(
+                db, task_id, post_subtasks, select_all
+            )
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_post_confirm_toggle_async 失败: task=%s", task_id)
@@ -1082,41 +1181,11 @@ class TaskAppSvc:
         :param results: [{"task_id": "...", "action": "completed"/"reassigned"}, ...]
 
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            ws = db.get(Workspace, workspace_id)
-            workspace_name = ws.path if ws else workspace_id
-            completed_lines = []
-            has_reassign = False
-            for r in results:
-                task = db.get(Task, r["task_id"])
-                task_name = task.name if task else r["task_id"]
-                executor = task.executor if task else "?"
-                tag = {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
-                if r["action"] == "reassigned":
-                    has_reassign = True
-                completed_lines.append(f"· {task_name} {tag} - 已完成")
-            task_list = "\n".join(completed_lines) or "· （无）"
-
-            reassign_note = ""
-            if has_reassign:
-                reassign_note = "\n\n已重新下发改交智能体的任务。"
-
-            elements = [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"✅ **确认完成已提交**\n\n"
-                        f"**工作空间：{workspace_name}**\n\n"
-                        f"**本批确认完成的任务：**"
-                    ),
-                },
-                {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
-                {"tag": "hr"},
-                {"tag": "markdown", "content": f"系统已记录。{reassign_note}"},
-            ]
-            card = build_done_card("确认完成已提交", "green", elements)
+            card = TaskAppSvc.build_task_complete_done_card_from_db(db, workspace_id, results)
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_task_complete_done_async 失败: ws=%s", workspace_id)

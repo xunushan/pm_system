@@ -404,7 +404,7 @@ def test_webhook_story5_mark_complete(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    assert resp.json()["toast"]["content"] == "日终总结已确认"
 
     db_session.flush()
     assert tasks[0].status == "已完成"
@@ -439,7 +439,7 @@ def test_webhook_story5_mark_incomplete(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    assert resp.json()["toast"]["content"] == "日终总结已确认"
 
     db_session.flush()
     assert tasks[0].status == "待执行"
@@ -469,7 +469,7 @@ def test_webhook_story5_no_change_no_patch(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    assert resp.json()["toast"]["content"] == "日终总结已确认"
     assert daily.is_confirmed is True
 
 
@@ -493,9 +493,7 @@ def test_webhook_story5_confirm_summary(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["confirmed"] is True
+    assert resp.json()["toast"]["content"] == "日终总结已确认"
 
     db_session.flush()
     assert daily.is_confirmed is True

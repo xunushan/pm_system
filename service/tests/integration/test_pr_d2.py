@@ -193,11 +193,10 @@ def test_push_card_not_configured_no_mapping(db_session, fake_redis_card):
 
 
 def test_update_card_story1_confirm(client, db_session, monkeypatch):
-    """story1_确认方案 -> update_card 刷已确认态（§S1 确认后，绿色）。"""
+    """story1_确认方案 -> 同步返回终态卡（§S1 确认后，绿色）。"""
     _patch_session_locals(monkeypatch, db_session)
     mock_confirm = patch.object(PlanAppSvc, "confirm")
-    mock_update = patch.object(FeishuClient, "update_card")
-    with mock_confirm as mc, mock_update as mu:
+    with mock_confirm as mc:
         from app.schemas.plan import PlanConfirmData
 
         mc.return_value = PlanConfirmData(
@@ -212,14 +211,13 @@ def test_update_card_story1_confirm(client, db_session, monkeypatch):
         payload = _form_outside_payload("om_s1", "story1_确认方案", draft_id="d1")
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    msg_id, card = mu.call_args[0]
-    assert msg_id == "om_s1"
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
+    assert "测试目标" in card["body"]["elements"][0]["content"]
 
 
 def test_update_card_schedule_b_confirm(client, db_session, monkeypatch):
-    """confirm_btn schedule_b -> update_card 刷已确认态（§S2 状态3，绿色）。"""
+    """confirm_btn schedule_b -> 同步返回终态卡（§S2 状态3，绿色）。"""
     goal, themes, _ = make_tree(db_session)
     db_session.flush()
     _patch_session_locals(monkeypatch, db_session)
@@ -227,19 +225,17 @@ def test_update_card_schedule_b_confirm(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload(
-            "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
-        )
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload(
+        "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
+    )
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_daily_plan_confirm(client, db_session, monkeypatch):
-    """confirm_btn daily_plan -> update_card 刷已确认态（§S3 状态2，绿色）。"""
+    """confirm_btn daily_plan -> 同步返回终态卡（§S3 状态2，绿色）。"""
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=1, tasks_per_phase=2)
     phases[0].status = "进行中"
     phases[0].activated_at = _TODAY
@@ -250,19 +246,17 @@ def test_update_card_daily_plan_confirm(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "daily_plan", "date": "2026-07-06", "prerequisites": []},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload(
-            "om_s3", "confirm_btn", {f"task_{tasks[0].id}": True, f"task_{tasks[1].id}": False}
-        )
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload(
+        "om_s3", "confirm_btn", {f"task_{tasks[0].id}": True, f"task_{tasks[1].id}": False}
+    )
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_btn_pass(client, db_session, monkeypatch):
-    """btn_pass -> update_card 刷验收通过态（§S4A 场景1，绿色）。"""
+    """btn_pass -> 同步返回终态卡（§S4A 场景1，绿色）。"""
     from tests.integration.test_story4a_agent import _make_full_tree
 
     goal, themes, phases, ws, tasks = _make_full_tree(db_session)
@@ -271,17 +265,15 @@ def test_update_card_btn_pass(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "verification", "task_id": tasks[0].id},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload("om_4a", "btn_pass", {})
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload("om_4a", "btn_pass", {})
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_btn_reject_retry(client, db_session, monkeypatch):
-    """btn_reject retry -> update_card 刷反馈已下发态（§S4A 场景2，橙色）。"""
+    """btn_reject retry -> 同步返回终态卡（§S4A 场景2，橙色）。"""
     from app.models.agent_process import AgentProcess
     from tests.integration.test_story4a_agent import _make_full_tree
 
@@ -298,18 +290,16 @@ def test_update_card_btn_reject_retry(client, db_session, monkeypatch):
     with (
         patch.object(task_app_svc.OpenCodeClient, "dispatch_task"),
         patch.object(task_app_svc, "set_task_timeout"),
-        patch.object(FeishuClient, "update_card") as mu,
     ):
         payload = _form_submit_payload("om_4a", "btn_reject", {"feedback": "加注释"})
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "orange"
 
 
 def test_update_card_post_confirm(client, db_session, monkeypatch):
-    """confirm_btn post_confirm -> update_card 刷确认后中间态（§S4B 状态2，绿色）。"""
+    """confirm_btn post_confirm -> 同步返回终态卡（§S4B 状态2，绿色）。"""
     from tests.integration.test_story4b_tasks import _activate_and_get_task
 
     goal, themes, phases, task = _activate_and_get_task(db_session)
@@ -324,15 +314,11 @@ def test_update_card_post_confirm(client, db_session, monkeypatch):
             "post_subtasks": [{"id": "p1", "name": "归档"}],
         },
     )
-    with (
-        patch.object(task_app_svc.OpenCodeClient, "dispatch_post_subtasks"),
-        patch.object(FeishuClient, "update_card") as mu,
-    ):
+    with patch.object(task_app_svc.OpenCodeClient, "dispatch_post_subtasks"):
         payload = _form_submit_payload("om_4b", "confirm_btn", {"post_p1": True})
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
@@ -360,20 +346,16 @@ def test_update_card_daily_summary(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "daily_summary", "daily_id": daily.id},
     )
-    with (
-        patch.object(daily_app_svc, "write_daily_md"),
-        patch.object(FeishuClient, "update_card") as mu,
-    ):
+    with patch.object(daily_app_svc, "write_daily_md"):
         payload = _form_submit_payload("om_s5", "confirm_btn", {f"task_{task.id}": True})
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_task_complete(client, db_session, monkeypatch):
-    """confirm_btn task_complete -> update_card 刷确认完成已提交态（§S4A 场景4，绿色）。"""
+    """confirm_btn task_complete -> 同步返回终态卡（§S4A 场景4，绿色）。"""
     from tests.integration.test_story4a_agent import _make_full_tree
 
     goal, themes, phases, ws, tasks = _make_full_tree(db_session)
@@ -386,20 +368,18 @@ def test_update_card_task_complete(client, db_session, monkeypatch):
         patch.object(TaskAppSvc, "confirm_complete") as mc,
         patch.object(TaskAppSvc, "reassign_to_agent"),
         patch.object(TaskAppSvc, "reassign_to_agent_async"),
-        patch.object(FeishuClient, "update_card") as mu,
     ):
         mc.return_value = {"task_id": tasks[1].id, "status": "已完成"}
         payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{tasks[1].id}": True})
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     mc.assert_called_once()
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_btn_activate(client, db_session, monkeypatch):
-    """btn_activate -> update_card 刷已激活态（§S8 状态2，绿色）。"""
+    """btn_activate -> 同步返回终态卡（§S8 状态2，绿色）。"""
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
     phases[0].status = "已完成"
     goal.status = "进行中"
@@ -410,17 +390,15 @@ def test_update_card_btn_activate(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload("om_s8", "btn_activate", {"deadline": "2026-07-25 +0800"})
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload("om_s8", "btn_activate", {"deadline": "2026-07-25 +0800"})
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
 def test_update_card_btn_defer(client, db_session, monkeypatch):
-    """btn_defer -> update_card 刷暂缓态（§S8 状态3，橙色）。"""
+    """btn_defer -> 同步返回终态卡（§S8 状态3，橙色）。"""
     goal, themes, phases = make_tree(db_session, n_themes=1, phases_per_theme=2)
     phases[0].status = "已完成"
     goal.status = "进行中"
@@ -431,27 +409,21 @@ def test_update_card_btn_defer(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "phase_linking", "phase_id": phases[1].id},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload("om_s8d", "btn_defer", {})
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload("om_s8d", "btn_defer", {})
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "orange"
 
 
 def test_update_card_story6_read(client, db_session, monkeypatch):
-    """story6_已阅周总结 -> update_card 刷已阅态（§S6 状态2，绿色）。"""
+    """story6_已阅周总结 -> 同步返回终态卡（§S6 状态2，绿色）。"""
     _patch_session_locals(monkeypatch, db_session)
-    with (
-        patch.object(weekly_app_svc, "write_weekly_md"),
-        patch.object(FeishuClient, "update_card") as mu,
-    ):
+    with patch.object(weekly_app_svc, "write_weekly_md"):
         payload = _form_outside_payload("om_s6", "story6_已阅周总结", week="2026-W28")
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
 
 
@@ -512,14 +484,13 @@ def test_reassign_async_in_webhook(client, db_session, monkeypatch):
     with (
         patch.object(TaskAppSvc, "confirm_complete") as mc,
         patch.object(TaskAppSvc, "reassign_to_agent_async") as ma,
-        patch.object(FeishuClient, "update_card"),
     ):
         mc.return_value = {"task_id": "x", "status": "已完成"}
         payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{task1.id}_reassign": True})
         resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    results = resp.json()["data"]["results"]
-    assert any(r["action"] == "reassigned" for r in results)
+    # 方案 B：同步返回 toast + card
+    assert resp.json()["toast"]["content"] == "确认完成已提交"
     ma.assert_called_once_with(task1.id)
 
 
@@ -531,7 +502,7 @@ def test_reassign_async_in_webhook(client, db_session, monkeypatch):
 
 
 def test_update_card_schedule_b_h5_url(client, db_session, monkeypatch):
-    """confirm_btn schedule_b -> update_card 终态卡含真实 h5_url（非 <h5_url> 占位符）。"""
+    """confirm_btn schedule_b -> 终态卡含真实 h5_url（非 <h5_url> 占位符）。"""
     goal, themes, _ = make_tree(db_session)
     db_session.flush()
     _patch_session_locals(monkeypatch, db_session)
@@ -540,14 +511,12 @@ def test_update_card_schedule_b_h5_url(client, db_session, monkeypatch):
         lambda msg_id: {"type": "schedule_b", "goal_id": goal.id},
     )
     monkeypatch.setattr("app.config.settings.h5_base_url", "http://h5test")
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_submit_payload(
-            "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
-        )
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_submit_payload(
+        "om_s2b", "confirm_btn", {f"dl_theme_{themes[0].id}": "2026-07-15 +0800"}
+    )
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     # 找含"前往配置页"的 markdown element
     md_elements = [
         e
@@ -566,20 +535,18 @@ def test_update_card_schedule_b_h5_url(client, db_session, monkeypatch):
 
 
 def test_s4b_select_all(client, db_session, monkeypatch):
-    """story4B_全选 -> update_card 刷新所有 checker checked=true（保留按钮）。"""
+    """story4B_全选 -> 同步返回刷新所有 checker checked=true（保留按钮）。"""
     _patch_session_locals(monkeypatch, db_session)
     post_subs = [{"id": "p1", "name": "归档"}, {"id": "p2", "name": "更新题库"}]
     monkeypatch.setattr(
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_outside_payload("om_4b", "story4B_全选", task_id="t1")
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_outside_payload("om_4b", "story4B_全选", task_id="t1")
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    assert resp.json()["message"] == "已全选"
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    assert resp.json()["toast"]["content"] == "已全选"
+    card = resp.json()["card"]["data"]
     # 卡片仍是 blue（非终态，保留按钮）
     assert card["header"]["template"] == "blue"
     # 所有 checker checked=true
@@ -590,20 +557,18 @@ def test_s4b_select_all(client, db_session, monkeypatch):
 
 
 def test_s4b_unselect_all(client, db_session, monkeypatch):
-    """story4B_全不选 -> update_card 刷新所有 checker checked=false（保留按钮）。"""
+    """story4B_全不选 -> 同步返回刷新所有 checker checked=false（保留按钮）。"""
     _patch_session_locals(monkeypatch, db_session)
     post_subs = [{"id": "p1", "name": "归档"}, {"id": "p2", "name": "更新题库"}]
     monkeypatch.setattr(
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    assert resp.json()["message"] == "已全不选"
-    mu.assert_called_once()
-    _, card = mu.call_args[0]
+    assert resp.json()["toast"]["content"] == "已全不选"
+    card = resp.json()["card"]["data"]
     # 卡片仍是 blue（非终态，保留按钮）
     assert card["header"]["template"] == "blue"
     # 所有 checker checked=false
@@ -621,11 +586,10 @@ def test_s4b_select_all_retains_buttons(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "post_confirm", "task_id": "t1", "post_subtasks": post_subs},
     )
-    with patch.object(FeishuClient, "update_card") as mu:
-        payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
-        resp = client.post(_WEBHOOK, json=payload)
+    payload = _form_outside_payload("om_4b", "story4B_全不选", task_id="t1")
+    resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
-    _, card = mu.call_args[0]
+    card = resp.json()["card"]["data"]
     form = card["body"]["elements"][1]
     # 确认按钮仍在
     buttons = [e for e in form["elements"] if e.get("tag") == "button"]

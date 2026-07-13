@@ -300,7 +300,8 @@ def test_webhook_story4a_confirm(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card（验收通过态）
+    assert resp.json()["toast"]["content"] == "验收通过"
     db_session.refresh(task)
     assert task.status == "已完成"
 
@@ -339,9 +340,10 @@ def test_webhook_story4a_reject(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["action"] == "retry"
-    assert data["retry_count"] == 1
+    # 方案 B：retry 路径同步返回 toast + card（反馈已下发态）
+    assert resp.json()["toast"]["content"] == "已下发修改"
+    db_session.refresh(task)
+    assert task.retry_count == 1
 
 
 # ===== 边界：3次重试 -> manual_intervention =====

@@ -11,7 +11,6 @@ from app.models.phase import Phase
 from app.models.task import Task
 from app.models.theme import Theme
 from app.services.draft_app_svc import DraftAppSvc
-from app.services.schedule_app_svc import ScheduleAppSvc
 from tests._factory import make_tree
 
 _WEBHOOK = "/webhook/feishu/card"
@@ -48,7 +47,10 @@ def _seed_draft(db_session) -> str:
 
 
 def test_story1_confirm_via_webhook(client, db_session):
-    """story1_确认方案 webhook -> PlanAppSvc.confirm 落库建 goal/theme/phase/task + 删 draft。"""
+    """story1_确认方案 webhook -> PlanAppSvc.confirm 落库建 goal/theme/phase/task + 删 draft。
+
+    方案 B：同步返回 toast + card（绿色已确认态），不再异步 update_card。
+    """
     draft_id = _seed_draft(db_session)
     payload = {
         "event": {
@@ -58,11 +60,13 @@ def test_story1_confirm_via_webhook(client, db_session):
     }
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    assert data["draft_deleted"] is True
-    assert data["themes_created"] == 1
-    assert data["phases_created"] == 1
-    assert data["tasks_created"] == 1
+    body = resp.json()
+    # 同步返回 toast + card（方案 B）
+    assert body["toast"]["type"] == "success"
+    assert body["toast"]["content"] == "方案已确认"
+    card = body["card"]["data"]
+    assert card["header"]["template"] == "green"
+    assert "方案已确认" in card["body"]["elements"][0]["content"]
     # draft 已删
     assert db_session.query(Draft).filter_by(id=draft_id).count() == 0
     # goal/theme/phase/task 已建
@@ -89,20 +93,18 @@ def test_story1_confirm_missing_draft_id(client):
 
 
 def test_story2_next_btn_via_webhook(client, db_session, monkeypatch):
-    """story2 next_btn form_submit -> 从 form_value 取勾选 themes -> patch_to_card_b_async。"""
+    """story2 next_btn form_submit -> 同步返回卡片 B（方案 B）。
+
+    从 form_value 取勾选 themes -> 查 DB -> build_schedule_card_b -> card.data 返回。
+    """
     goal, themes, phases = make_tree(db_session, n_themes=2, phases_per_theme=1)
     # mock card_registry 反查 goal_id
     monkeypatch.setattr(
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "schedule_a", "goal_id": goal.id},
     )
-    # mock patch_to_card_b_async（不真调 feishu）
-    patch_calls = []
-
-    def _fake_patch(message_id, theme_ids, goal_id):
-        patch_calls.append((message_id, theme_ids, goal_id))
-
-    monkeypatch.setattr(ScheduleAppSvc, "patch_to_card_b_async", _fake_patch)
+    # mock set_card_context（不写真实 Redis）
+    monkeypatch.setattr("app.webhook.feishu_card.set_card_context", lambda *a, **kw: None)
 
     payload = {
         "event": {
@@ -118,11 +120,17 @@ def test_story2_next_btn_via_webhook(client, db_session, monkeypatch):
     }
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    # patch_to_card_b_async 被 BackgroundTasks 调用
-    assert len(patch_calls) == 1
-    assert patch_calls[0][0] == "om_s2"
-    assert patch_calls[0][1] == [themes[0].id]
-    assert patch_calls[0][2] == goal.id
+    body = resp.json()
+    # 同步返回 toast + card（方案 B）
+    assert body["toast"]["content"] == "请填 deadline"
+    card = body["card"]["data"]
+    # 卡片 B 是蓝色（保留按钮）
+    assert card["header"]["template"] == "blue"
+    # 含 date_picker（dl_theme_<theme_id>）
+    form = card["body"]["elements"][1]
+    date_pickers = [e for e in form["elements"] if e.get("tag") == "date_picker"]
+    assert len(date_pickers) == 1
+    assert date_pickers[0]["name"] == f"dl_theme_{themes[0].id}"
 
 
 def test_story2_next_btn_no_themes_selected(client, db_session, monkeypatch):

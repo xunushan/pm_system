@@ -266,9 +266,8 @@ def test_webhook_story6_confirm(client, db_session, monkeypatch):
         resp = client.post(_WEBHOOK, json=payload)
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["confirmed"] is True
+    # 方案 B：同步返回 toast + card（已阅态）
+    assert resp.json()["toast"]["content"] == "已阅"
 
     db_session.flush()
     rec = db_session.query(WeeklyRecord).filter_by(week=_WEEK).one()

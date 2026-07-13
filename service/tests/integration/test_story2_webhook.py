@@ -42,7 +42,8 @@ def test_webhook_schedule_confirm_activates(client, db_session, monkeypatch):
     )
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["code"] == 0
+    # 方案 B：同步返回 toast + card
+    assert resp.json()["toast"]["content"] == "调度已确认"
 
     assert db_session.query(Phase).filter_by(status="进行中").count() == 1
     assert themes[0].status == "进行中"

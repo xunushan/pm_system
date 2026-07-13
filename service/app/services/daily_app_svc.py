@@ -523,59 +523,126 @@ class DailyAppSvc:
             set_card_context(message_id, {"type": "daily_summary", "daily_id": daily_id})
         return message_id
 
+    # ---- 终态卡片构建（纯函数 + _from_db 供 webhook 同步返回）----
+
+    @staticmethod
+    def build_daily_plan_done_card(date_str: str, task_lines: str, pre_lines: str | None) -> dict:
+        """构建今日计划已确认终态卡片（纯函数，doc/09 §S3 状态2）。
+
+        绿色标题 + "✅ 今日计划已确认" + 勾选任务 + 前置 + 异步执行提示。
+        """
+        elements: list[dict] = [
+            {"tag": "markdown", "content": "✅ **今日计划已确认**\n\n**今日任务：**"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": task_lines}},
+        ]
+        if pre_lines:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "markdown", "content": "**今日前置：**"})
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": pre_lines}})
+        elements.append({"tag": "hr"})
+        elements.append({"tag": "markdown", "content": "前置与智能体任务已异步执行。"})
+        return build_done_card(f"📋 今日计划已确认（{date_str}）", "green", elements)
+
+    @staticmethod
+    def build_daily_plan_done_card_from_db(db: Session, daily_id: str) -> dict | None:
+        """查询 DB + 构建今日计划已确认终态卡片（供 webhook 同步调用）。
+
+        daily 不存在时返回 None。
+        """
+        daily = db.get(DailyRecord, daily_id)
+        if daily is None:
+            return None
+        date_str = daily.date.isoformat()
+
+        # 查 daily_tasks -> task names + executor
+        dt_rows = db.execute(
+            select(Task, Theme)
+            .join(DailyTask, DailyTask.task_id == Task.id)
+            .join(Phase, Task.phase_id == Phase.id)
+            .join(Theme, Phase.theme_id == Theme.id)
+            .where(DailyTask.daily_id == daily_id)
+        ).all()
+        task_lines = (
+            "\n".join(f"· {task.name} {_executor_tag_inline(task.executor)}" for task, _ in dt_rows)
+            or "· （无）"
+        )
+
+        # 查前置 subtasks
+        pre_rows = (
+            db.execute(
+                select(Subtask).where(
+                    Subtask.task_id.in_([r[0].id for r in dt_rows]), Subtask.type == "前置"
+                )
+            )
+            .scalars()
+            .all()
+        )
+        pre_lines = "\n".join(f"· {s.name}" for s in pre_rows) if pre_rows else None
+
+        return DailyAppSvc.build_daily_plan_done_card(date_str, task_lines, pre_lines)
+
+    @staticmethod
+    def build_summary_done_card(date_str: str, task_list: str, phase_lines: str) -> dict:
+        """构建日终总结已确认终态卡片（纯函数，doc/09 §S5 状态2）。
+
+        绿色标题 + "✅ 日终总结已确认" + 任务最终状态（✅/❌）+ 阶段进展。
+        """
+        elements = [
+            {"tag": "markdown", "content": "✅ **日终总结已确认**\n\n**今日任务最终状态：**"},
+            {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
+            {"tag": "hr"},
+            {
+                "tag": "markdown",
+                "content": (f"**阶段进展：**\n{phase_lines}\n\n daily.md 快照已写入。"),
+            },
+        ]
+        return build_done_card(f"📊 日终总结已确认（{date_str}）", "green", elements)
+
+    @staticmethod
+    def build_summary_done_card_from_db(db: Session, daily_id: str) -> dict | None:
+        """查询 DB + 构建日终总结已确认终态卡片（供 webhook 同步调用）。
+
+        daily 不存在时返回 None。
+        """
+        daily = db.get(DailyRecord, daily_id)
+        if daily is None:
+            return None
+        date_str = daily.date.isoformat()
+        stats = StatsAppSvc(db).get_daily_stats("system", daily.date)
+
+        # 任务最终状态（✅/❌）
+        task_lines = []
+        for t in stats.completed_tasks:
+            task_lines.append(f"· {t.name} ✅ 已完成")
+        for t in stats.incomplete_tasks:
+            task_lines.append(f"· {t.name} ❌ 未完成")
+        task_list = "\n".join(task_lines) or "· （无任务）"
+
+        # 阶段进展
+        if stats.phase_health:
+            phase_lines = "\n".join(
+                f"· {p.name}：{p.completed}/{p.total} {p.status}" for p in stats.phase_health
+            )
+        else:
+            phase_lines = "· （无阶段数据）"
+
+        return DailyAppSvc.build_summary_done_card(date_str, task_list, phase_lines)
+
+    # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
+
     @staticmethod
     def refresh_daily_plan_done_async(message_id: str, daily_id: str) -> None:
         """事务后异步刷新今日计划卡到终态（独立 session，BackgroundTasks 调用）。
 
         §S3 状态2 已确认：绿色，"✅ 今日计划已确认" + 勾选任务 + 前置 + 异步执行提示。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            daily = db.get(DailyRecord, daily_id)
-            if daily is None:
-                return
-            date_str = daily.date.isoformat()
-
-            # 查 daily_tasks -> task names + executor
-            dt_rows = db.execute(
-                select(Task, Theme)
-                .join(DailyTask, DailyTask.task_id == Task.id)
-                .join(Phase, Task.phase_id == Phase.id)
-                .join(Theme, Phase.theme_id == Theme.id)
-                .where(DailyTask.daily_id == daily_id)
-            ).all()
-            task_lines = (
-                "\n".join(
-                    f"· {task.name} {_executor_tag_inline(task.executor)}" for task, _ in dt_rows
-                )
-                or "· （无）"
-            )
-
-            # 查前置 subtasks
-            pre_rows = (
-                db.execute(
-                    select(Subtask).where(
-                        Subtask.task_id.in_([r[0].id for r in dt_rows]), Subtask.type == "前置"
-                    )
-                )
-                .scalars()
-                .all()
-            )
-            pre_lines = "\n".join(f"· {s.name}" for s in pre_rows) if pre_rows else None
-
-            elements: list[dict] = [
-                {"tag": "markdown", "content": "✅ **今日计划已确认**\n\n**今日任务：**"},
-                {"tag": "div", "text": {"tag": "lark_md", "content": task_lines}},
-            ]
-            if pre_lines:
-                elements.append({"tag": "hr"})
-                elements.append({"tag": "markdown", "content": "**今日前置：**"})
-                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": pre_lines}})
-            elements.append({"tag": "hr"})
-            elements.append({"tag": "markdown", "content": "前置与智能体任务已异步执行。"})
-            card = build_done_card(f"📋 今日计划已确认（{date_str}）", "green", elements)
-            FeishuClient().update_card(message_id, card)
+            card = DailyAppSvc.build_daily_plan_done_card_from_db(db, daily_id)
+            if card is not None:
+                FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_daily_plan_done_async 失败: daily=%s", daily_id)
         finally:
@@ -587,42 +654,13 @@ class DailyAppSvc:
 
         §S5 状态2 已确认：绿色，"✅ 日终总结已确认" + 任务最终状态（✅/❌）+ 阶段进展。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            daily = db.get(DailyRecord, daily_id)
-            if daily is None:
-                return
-            date_str = daily.date.isoformat()
-            stats = StatsAppSvc(db).get_daily_stats("system", daily.date)
-
-            # 任务最终状态（✅/❌）
-            task_lines = []
-            for t in stats.completed_tasks:
-                task_lines.append(f"· {t.name} ✅ 已完成")
-            for t in stats.incomplete_tasks:
-                task_lines.append(f"· {t.name} ❌ 未完成")
-            task_list = "\n".join(task_lines) or "· （无任务）"
-
-            # 阶段进展
-            if stats.phase_health:
-                phase_lines = "\n".join(
-                    f"· {p.name}：{p.completed}/{p.total} {p.status}" for p in stats.phase_health
-                )
-            else:
-                phase_lines = "· （无阶段数据）"
-
-            elements = [
-                {"tag": "markdown", "content": "✅ **日终总结已确认**\n\n**今日任务最终状态：**"},
-                {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
-                {"tag": "hr"},
-                {
-                    "tag": "markdown",
-                    "content": (f"**阶段进展：**\n{phase_lines}\n\n daily.md 快照已写入。"),
-                },
-            ]
-            card = build_done_card(f"📊 日终总结已确认（{date_str}）", "green", elements)
-            FeishuClient().update_card(message_id, card)
+            card = DailyAppSvc.build_summary_done_card_from_db(db, daily_id)
+            if card is not None:
+                FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_summary_done_async 失败: daily=%s", daily_id)
         finally:

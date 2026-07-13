@@ -307,6 +307,135 @@ class ScheduleAppSvc:
             set_card_context(message_id, {"type": "schedule_a", "goal_id": goal_id})
         return message_id
 
+    # ---- 终态卡片构建（纯函数 + _from_db 供 webhook 同步返回）----
+
+    @staticmethod
+    def build_schedule_card_b_from_db(
+        db: Session, theme_ids: list[str], goal_id: str
+    ) -> dict | None:
+        """查询 DB + 构建调度卡片 B（供 webhook 同步返回 + patch_to_card_b_async 共用）。
+
+        查每个选中专题的第 1 个未开始阶段 -> build_schedule_card_b。
+        无可激活阶段时返回 None。
+        """
+        goal = db.get(Goal, goal_id) if goal_id else None
+        goal_name = goal.name if goal else ""
+        phases: list[dict] = []
+        for theme_id in theme_ids:
+            theme = db.get(Theme, theme_id)
+            if theme is None:
+                continue
+            theme_phases = PhaseRepository(db).list_by_theme(theme_id)
+            locked = next((p for p in theme_phases if p.status == "未开始"), None)
+            if locked is None:
+                continue
+            phases.append(
+                {
+                    "theme_id": theme_id,
+                    "theme_name": theme.name,
+                    "phase_name": locked.name,
+                    "type": theme.type,
+                }
+            )
+        if not phases:
+            return None
+        return build_schedule_card_b(goal_name, phases)
+
+    @staticmethod
+    def build_schedule_done_card(goal_name: str, phase_lines: list[str], h5_url: str) -> dict:
+        """构建调度已确认终态卡片（纯函数，doc/09 §S2 状态3）。
+
+        绿色标题 + "✅ 调度已确认" + 激活阶段列表 + 工作空间提示。
+        :param phase_lines: 已格式化的阶段行列表（"· 主题/阶段 - deadline ..."）
+        """
+        elements: list[dict] = [
+            {
+                "tag": "markdown",
+                "content": f"**目标：{goal_name}**\n\n✅ **调度已确认，已激活以下阶段：**",
+            },
+        ]
+        for line in phase_lines:
+            elements.append({"tag": "div", "text": {"tag": "lark_md", "content": line}})
+        elements.append({"tag": "hr"})
+        if h5_url:
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": f"工作空间正在初始化。调整请[前往配置页]({h5_url})",
+                }
+            )
+        else:
+            elements.append({"tag": "markdown", "content": "工作空间正在初始化。调整请前往配置页"})
+        return build_done_card("🎯 调度已确认", "green", elements)
+
+    @staticmethod
+    def build_schedule_done_card_from_db(
+        db: Session, goal_id: str, activated_phases: list[dict], h5_url: str = ""
+    ) -> dict:
+        """查询 DB + 构建调度已确认终态卡片（供 webhook 同步调用）。
+
+        :param activated_phases: [{"phase_id": "...", "name": "...", "deadline": "2026-07-15"}, ...]
+        """
+        goal = db.get(Goal, goal_id) if goal_id else None
+        goal_name = goal.name if goal else ""
+
+        phase_lines: list[str] = []
+        for ap in activated_phases:
+            phase = db.get(Phase, ap.get("phase_id", ""))
+            theme_name = ""
+            if phase:
+                theme = db.get(Theme, phase.theme_id)
+                theme_name = theme.name if theme else ""
+            deadline_str = ap.get("deadline", "")
+            label = f"{theme_name} / {ap.get('name', '')}" if theme_name else ap.get("name", "")
+            phase_lines.append(f"· {label} - deadline {deadline_str}")
+
+        return ScheduleAppSvc.build_schedule_done_card(goal_name, phase_lines, h5_url)
+
+    @staticmethod
+    def build_activate_done_card(phase_name: str, deadline_str: str) -> dict:
+        """构建阶段已激活终态卡片（纯函数，doc/09 §S8 状态2）。
+
+        绿色标题 + "✅ 下一阶段已激活" + deadline + 工作空间提示。
+        """
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"✅ **下一阶段已激活：{phase_name}**\n\n"
+                    f"· deadline：{deadline_str}\n"
+                    "· 工作空间已就绪\n\n"
+                    "阶段已进入进行中，即时级联已触发。"
+                ),
+            }
+        ]
+        return build_done_card("✅ 阶段已激活", "green", elements)
+
+    @staticmethod
+    def build_defer_done_card(phase_name: str) -> dict:
+        """构建阶段已暂缓终态卡片（纯函数，doc/09 §S8 状态3）。
+
+        橙色标题 + "⏳ 已记录暂缓" + 24h 后提醒 + H5 链接提示。
+        """
+        elements = [
+            {
+                "tag": "markdown",
+                "content": (
+                    f"**下一阶段：{phase_name}**\n\n"
+                    "⏳ **已记录暂缓激活，24 小时后将再次提醒**\n\n"
+                    "如需立即激活，前往 H5 页面手动操作。"
+                ),
+            }
+        ]
+        return build_done_card("⏳ 已记录暂缓", "orange", elements)
+
+    @staticmethod
+    def build_defer_done_card_from_db(db: Session, phase_id: str) -> dict:
+        """查询 DB + 构建阶段已暂缓终态卡片（供 webhook 同步调用）。"""
+        phase = db.get(Phase, phase_id)
+        phase_name = phase.name if phase else phase_id
+        return ScheduleAppSvc.build_defer_done_card(phase_name)
+
     @staticmethod
     def patch_to_card_b_async(message_id: str, theme_ids: list[str], goal_id: str) -> None:
         """事务后异步：patch 卡片 A -> B（doc/09 §S2 状态1->2）。
@@ -315,34 +444,17 @@ class ScheduleAppSvc:
         铁律 §3#3：HTTP（update_card）事务后异步，满足飞书 3 秒回调。
         独立 session（BackgroundTasks 调用）。
 
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
+
         :param theme_ids: 用户勾选的专题 ID 列表（从 form_value.theme_<id> 提取）。
         :param goal_id: 卡片关联的目标 ID（从 card_registry 反查，可能为空）。
         """
         db = SessionLocal()
         try:
-            goal = db.get(Goal, goal_id) if goal_id else None
-            goal_name = goal.name if goal else ""
-            phases: list[dict] = []
-            for theme_id in theme_ids:
-                theme = db.get(Theme, theme_id)
-                if theme is None:
-                    continue
-                theme_phases = PhaseRepository(db).list_by_theme(theme_id)
-                locked = next((p for p in theme_phases if p.status == "未开始"), None)
-                if locked is None:
-                    continue
-                phases.append(
-                    {
-                        "theme_id": theme_id,
-                        "theme_name": theme.name,
-                        "phase_name": locked.name,
-                        "type": theme.type,
-                    }
-                )
-            if not phases:
+            card = ScheduleAppSvc.build_schedule_card_b_from_db(db, theme_ids, goal_id)
+            if card is None:
                 logger.warning("patch_to_card_b_async: 无可激活阶段, themes=%s", theme_ids)
                 return
-            card = build_schedule_card_b(goal_name, phases)
             FeishuClient().update_card(message_id, card)
             # 更新 card_registry 类型 schedule_a -> schedule_b
             # 供 confirm_btn form_submit 回调区分（卡片 B 的确认调度 vs 其他 confirm_btn）
@@ -362,47 +474,16 @@ class ScheduleAppSvc:
 
         §S2 状态3 已确认：绿色，"✅ 调度已确认" + 激活阶段 + deadline + 工作空间提示。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
 
         :param activated_phases: [{"phase_id": "...", "name": "...", "deadline": "2026-07-15"}, ...]
         :param h5_url: H5 配置页链接（空则降级为纯文字提示，参考 build_schedule_card_a 模式）
         """
         db = SessionLocal()
         try:
-            goal = db.get(Goal, goal_id) if goal_id else None
-            goal_name = goal.name if goal else ""
-
-            phase_lines = []
-            for ap in activated_phases:
-                phase = db.get(Phase, ap.get("phase_id", ""))
-                theme_name = ""
-                if phase:
-                    theme = db.get(Theme, phase.theme_id)
-                    theme_name = theme.name if theme else ""
-                deadline_str = ap.get("deadline", "")
-                label = f"{theme_name} / {ap.get('name', '')}" if theme_name else ap.get("name", "")
-                phase_lines.append(f"· {label} - deadline {deadline_str}")
-
-            elements: list[dict] = [
-                {
-                    "tag": "markdown",
-                    "content": f"**目标：{goal_name}**\n\n✅ **调度已确认，已激活以下阶段：**",
-                },
-            ]
-            for line in phase_lines:
-                elements.append({"tag": "div", "text": {"tag": "lark_md", "content": line}})
-            elements.append({"tag": "hr"})
-            if h5_url:
-                elements.append(
-                    {
-                        "tag": "markdown",
-                        "content": f"工作空间正在初始化。调整请[前往配置页]({h5_url})",
-                    }
-                )
-            else:
-                elements.append(
-                    {"tag": "markdown", "content": "工作空间正在初始化。调整请前往配置页"}
-                )
-            card = build_done_card("🎯 调度已确认", "green", elements)
+            card = ScheduleAppSvc.build_schedule_done_card_from_db(
+                db, goal_id, activated_phases, h5_url
+            )
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_schedule_done_async 失败: goal=%s", goal_id)
@@ -411,23 +492,13 @@ class ScheduleAppSvc:
 
     @staticmethod
     def refresh_activate_done_async(message_id: str, phase_name: str, deadline_str: str) -> None:
-        """事务后异步刷新衔接卡到已激活态（独立 session，BackgroundTasks 调用）。
+        """事务后异步刷新衔接卡到已激活态（BackgroundTasks 调用）。
 
         §S8 状态2 已激活：绿色，"✅ 下一阶段已激活" + deadline + 工作空间提示。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
-        elements = [
-            {
-                "tag": "markdown",
-                "content": (
-                    f"✅ **下一阶段已激活：{phase_name}**\n\n"
-                    f"· deadline：{deadline_str}\n"
-                    "· 工作空间已就绪\n\n"
-                    "阶段已进入进行中，即时级联已触发。"
-                ),
-            }
-        ]
-        card = build_done_card("✅ 阶段已激活", "green", elements)
+        card = ScheduleAppSvc.build_activate_done_card(phase_name, deadline_str)
         try:
             FeishuClient().update_card(message_id, card)
         except Exception:
@@ -439,22 +510,11 @@ class ScheduleAppSvc:
 
         §S8 状态3 已暂缓：橙色，"⏳ 已记录暂缓" + 24h 后提醒 + H5 链接。
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
+        保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。
         """
         db = SessionLocal()
         try:
-            phase = db.get(Phase, phase_id)
-            phase_name = phase.name if phase else phase_id
-            elements = [
-                {
-                    "tag": "markdown",
-                    "content": (
-                        f"**下一阶段：{phase_name}**\n\n"
-                        "⏳ **已记录暂缓激活，24 小时后将再次提醒**\n\n"
-                        "如需立即激活，前往 H5 页面手动操作。"
-                    ),
-                }
-            ]
-            card = build_done_card("⏳ 已记录暂缓", "orange", elements)
+            card = ScheduleAppSvc.build_defer_done_card_from_db(db, phase_id)
             FeishuClient().update_card(message_id, card)
         except Exception:
             logger.exception("refresh_defer_done_async 失败: phase=%s", phase_id)
