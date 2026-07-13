@@ -66,10 +66,13 @@
 - [x] S3 真测通过（数据层：daily_records/daily_tasks 落库 task_id 与勾选一致 + 前置 subtask + executor=NULL）
 - [x] S4A 真测通过（数据层：经真实 callback API record_output 推验收卡；btn_pass 验收通过 task 完成+级联；btn_reject 需要修改 retry_count+1+feedback。opencode 真实 dispatch 后补--retry 路径 dispatch_task 超时 httpcore.ReadTimeout 是 opencode 执行 learning 任务卡住，非卡片交互问题）
 - [x] S4B 真测通过（数据层：board API 改 executor=human + PATCH 完成 + push_post_confirm_card 推后置卡；全选/全不选 toggle 方案B立即刷新；confirm_btn 后置 2 行落库（可全取消铁律§9）。**前置约束：post_confirm 要求 executor=human，e2e 跳过 Skill 需先用 board API 填 executor**）
-- [ ] S5 -> S9 逐项真测（真实推卡 + 真实点击 + 禁止改 DB + 真实 opencode，按 doc/09 样式验证）
+- [x] S5 真测通过（数据层：GET /daily/summary/generate 统计 + push_daily_summary_card 推日终卡 + webhook confirm_btn daily_summary 反转 checker + is_confirmed=1 + daily.md 写入；**重复点击幂等**返回方案B绿卡，不再 409）
+- [x] S6 真测通过（数据层：push_weekly_summary_card_from_db 服务自汇总日->周（按 tasks.completed_at 聚合）+ webhook story6_已阅周总结 confirm_summary 幂等 + write_weekly_md；DB 核对 4 类数据相符：本周完成 3 任务/4 阶段健康度/每日趋势/智能体产出 2 文件）
+- [ ] S7 -> S9 逐项真测（真实推卡 + 真实点击 + 禁止改 DB + 真实 opencode，按 doc/09 样式验证）
 
 #### e2e 发现的缺陷（待修）
 - ~~**[P1] 卡片回调后按钮长时间可点击**~~ ✅ 已修（PR #31 合并 de64828）。方案 B：webhook 同步在响应体返回终态卡片 `{"toast","card":{"type":"raw","data":<schema2.0>}}`，飞书立即更新（实测 S1 点击后立即变绿）。飞书官方「方式一：3秒内立即更新卡片」。耗时副作用仍异步。623 测试绿 + CI 绿 + code-reviewer 建议合并。
+- ~~**[P1] confirm_summary 不幂等致重复点击报错+卡片不刷新**~~ ✅ 已修（PR #32）。daily/weekly confirm_summary 对已确认记录抛 ConflictError（409）-> 飞书收到非方案B响应 -> 卡片不刷新、按钮仍可点（违反铁律§11）。改幂等直接返回成功，重复点击也同步返回终态卡。627 测试绿（+3 回归）。
 - **[P2] S3 已确认态任务行缺阶段名**：`daily_app_svc.py` build_daily_plan_done_card 任务行只显示 `task.name`，丢 `phase.name`，不同阶段同名任务刷新后无法区分。dt_rows 已 JOIN Phase，加 `（{phase.name}）` 即可。
 - **[观测] FeishuClient token 实例级缓存**：`refresh_*_async` 每次新建 FeishuClient 实例，token 不共享（每次多 179ms）。可改类级缓存。（方案 B 后 refresh_*_async 只用于非回调场景，影响降低）
 
