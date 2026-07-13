@@ -31,3 +31,9 @@ workspaces/
 .vscode/
 .idea/
 .claude/worktrees/
+
+# e2e 测试产物归档（临时测试数据，不入版本控制；PROGRESS 文档归档除外）
+archive/e2e_workspaces/
+archive/e2e_vault_snapshots/
+service/data/*.db.archive.*
+service/data/*.db.bak.*
