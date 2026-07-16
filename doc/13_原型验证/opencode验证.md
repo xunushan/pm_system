@@ -1,3 +1,9 @@
+---
+版本: v1.0
+状态: accepted
+更新: 2026-07-16
+---
+
 # opencode 验证（serve 集成行为）
 
 > opencode serve 集成验证事实。

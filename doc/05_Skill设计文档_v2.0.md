@@ -1,19 +1,12 @@
-# 目标管理系统 — Skill 设计文档
-
-> 版本：v2.0
-> 日期：2026-07-08
-> 基于：目标管理系统完整方案 v2.0 + 流程优化方案（五轮 review 后）
-> 说明：本文档只定义 Skill 逻辑，不讨论实现细节
-> 变更（v2.0，五轮 review 后最终版）：
-> 1. **Skill 5 个原子能力** — pm/pm-plan/pm-daily/pm-subtask/pm-summary，去剧本化
-> 2. **pm 主路由纯路由 + 预填链接** — pm 不直接调 Service；生成类路由到子 Skill，配置类生成预填 H5 链接
-> 3. **pm-plan 收敛** — 只沟通+产出规划，逐专题生成追加到 drafts，总览卡片触发写库
-> 4. **pm-daily 增加 executor 推断 + 前置整体生成** — 按专题 type 推断 executor，前置按今日整体生成（不按单个任务）
-> 5. **pm-subtask 承担前置（今日整体）+ 后置（单个任务）** — type 参数区分，Service 不调 LLM
-> 6. **配置类操作不建 Skill** — 走 H5 页面 CRUD，pm 配置类指令生成预填链接
-> 7. **Story 编号更新** — Story 1（原0+1）、Story 8（原9）、Story 9（原10）
-
 ---
+版本: v2.0
+状态: accepted
+更新: 2026-07-16
+---
+
+# 目标管理系统 - Skill 设计文档
+
+> 本文档只定义 Skill 逻辑，不讨论实现细节。
 
 # 一、Skill 判定原则与清单
 

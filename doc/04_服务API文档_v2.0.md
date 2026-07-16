@@ -1,22 +1,12 @@
-# 目标管理系统 — 服务 API 文档
-
-> 版本：v2.0
-> 日期：2026-07-08
-> 基于：目标管理系统完整方案 v2.0 + 流程优化方案（五轮 review 后）
-> 说明：本文档只定义接口格式，不讨论实现细节
-> 变更（v2.0，五轮 review 后最终版）：
-> 1. **入口 C 改为 H5 页面** — 去多维表格变更回调（`/webhook/bitable/record`），H5 页面调 Service REST API
-> 2. **drafts 恢复** — 用于 pm-plan 确认前存储规划数据（纯存储，规避飞书回调 30KB 限制）
-> 3. **plans/confirm 用 draft_id** — 确认按钮回调只传 draft_id，Service 读 drafts 写正式表
-> 4. **schedules/confirm 多选+managed** — 多选专题+设 managed/path，patch 卡片填 deadline
-> 5. **新增 tasks/{id}/confirm-complete**（4A 人工确认完成，无后置）
-> 6. **新增 tasks/{id}/post-confirm**（4B 后置确认，可全取消）
-> 7. **新增 tasks DELETE**（物理删除）
-> 8. **即时级联** — tasks/complete、output/confirm、board/status 事务内级联；daily/summary/confirm 不级联
-> 9. **状态机扩充** — 已暂停态 + 有限回退；tasks 去"需人工介入"
-> 10. **Story 编号更新** — Story 1（原0+1）、Story 8（原9）、Story 9（原10）
-
 ---
+版本: v2.0
+状态: accepted
+更新: 2026-07-16
+---
+
+# 目标管理系统 - 服务 API 文档
+
+> 本文档只定义接口格式，不讨论实现细节。
 
 # 一、API 清单
 

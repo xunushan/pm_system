@@ -1,7 +1,7 @@
 ---
-> 版本：v2.0
-> 状态：accepted
-> 更新：2026-07-15
+版本: v2.0
+状态: accepted
+更新: 2026-07-16
 ---
 
 # Feature: 执行前后模板配置 (Pre/Post Execution Template Config)
