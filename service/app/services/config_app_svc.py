@@ -1,6 +1,6 @@
 """ConfigAppSvc：子任务模板配置 CRUD + 合并查询。
 
-纯 CRUD（doc/05 line 48「纯 CRUD」），走 H5 页面，不建 Skill（doc/03 8.13）。
+纯 CRUD（doc/05 §1.3：模板配置 CRUD），走 H5 页面，不建 Skill（doc/03 §8.13）。
 事务由本类管理：写 DB -> commit。无 IO/HTTP（事务内禁止，铁律 #3）。
 
 合并规则（doc/02 2.18）：
@@ -9,8 +9,8 @@
   Step 2: 查专题级模板（scope_type='theme'）
   Step 3: 合并去重（阶段级优先，同名以阶段级为准，无顺序）
 
-配置时不校验专题 type（doc/01 line 572，智能体专题配了也不提示）。
-删除标记 inactive（非物理删除，可恢复，doc/01 line 581）。
+配置时不校验专题 type（doc/01 S7 AC：配置时不校验专题类型，智能体专题配了也不提示）。
+删除标记 inactive（非物理删除，可恢复，doc/01 S7 AC：删除可恢复）。
 """
 
 from uuid import uuid4
@@ -101,7 +101,7 @@ class ConfigAppSvc:
     def create_template(self, req: SubtaskTemplateCreateRequest) -> SubtaskTemplateData:
         """创建模板。UNIQUE(scope_id,type,name) 冲突 -> 3001。
 
-        配置时不校验专题 type（doc/01 line 572）。
+        配置时不校验专题 type（doc/01 S7 AC：配置时不校验专题类型）。
         """
         self._validate_scope_type(req.scope_type)
         self._validate_type(req.type)
@@ -158,7 +158,7 @@ class ConfigAppSvc:
     def delete_template(self, template_id: str) -> SubtaskTemplateDeleteData:
         """删除模板：标记 inactive（非物理删除，可恢复）。
 
-        幂等：已 inactive 的再删不报错（doc/01 line 581）。
+        幂等：已 inactive 的再删不报错（doc/01 S7 AC：删除可恢复）。
         """
         template = self._require(template_id)
         if template.status != "inactive":

@@ -34,7 +34,7 @@ _FORWARD_TRANSITIONS: frozenset[tuple[str, str, str]] = frozenset(
 
 # pause/resume/revert 流转：(entity, from, to) -> change_type
 # pause/revert 必填 reason；resume 不要求
-# S5 实现 phase/task；S9 board 扩展 goal/theme（doc/02 §2.16 回退规则通用，line 8：
+# S5 实现 phase/task；S9 board 扩展 goal/theme（doc/02 §2.16 回退规则通用：
 #   "阶段/任务/专题/目标支持已暂停"，pause/resume/revert 规则一致）
 _PAUSED_TRANSITIONS: dict[tuple[str, str, str], str] = {
     ("phase", "进行中", "已暂停"): "pause",

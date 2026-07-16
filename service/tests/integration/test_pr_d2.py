@@ -5,7 +5,6 @@
     daily_summary、task_complete、post_confirm
   - 12 回调 update_card 补全（doc/09 §通用规则）：每个回调点击后异步刷终态卡
   - delete_session 接入（D26）：trigger_reject_async 3 次不通过退 session
-  - reassign_to_agent 异步化（P2）：事务内改 executor，事务后异步 start_agent_serve
 """
 
 from datetime import date
@@ -364,11 +363,7 @@ def test_update_card_task_complete(client, db_session, monkeypatch):
         "app.webhook.feishu_card.get_card_context",
         lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
     )
-    with (
-        patch.object(TaskAppSvc, "confirm_complete") as mc,
-        patch.object(TaskAppSvc, "reassign_to_agent"),
-        patch.object(TaskAppSvc, "reassign_to_agent_async"),
-    ):
+    with patch.object(TaskAppSvc, "confirm_complete") as mc:
         mc.return_value = {"task_id": tasks[1].id, "status": "已完成"}
         payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{tasks[1].id}": True})
         resp = client.post(_WEBHOOK, json=payload)
@@ -425,73 +420,6 @@ def test_update_card_story6_read(client, db_session, monkeypatch):
     assert resp.status_code == 200
     card = resp.json()["card"]["data"]
     assert card["header"]["template"] == "green"
-
-
-# ===== Block 3: reassign_to_agent 异步化（P2，3 秒超时）=====
-
-
-def test_reassign_to_agent_no_sync_start_agent_serve(db_session):
-    """reassign_to_agent 事务内只改 executor，不同步调 start_agent_serve（铁律 §3#4）。"""
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task = tasks[0]
-    task.executor = "human"
-    db_session.flush()
-
-    with patch.object(task_app_svc.OpenCodeClient, "start_agent_serve") as mock_start:
-        result = TaskAppSvc(db_session).reassign_to_agent(task.id)
-
-    db_session.refresh(task)
-    assert task.executor == "agent"
-    assert result["reassigned"] is True
-    # 同步路径不调 start_agent_serve（改异步）
-    mock_start.assert_not_called()
-
-
-def test_reassign_to_agent_async_calls_start_agent_serve(db_session, monkeypatch):
-    """reassign_to_agent_async 异步调 start_agent_serve（BackgroundTasks）。"""
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task = tasks[0]
-    task.executor = "agent"
-    db_session.flush()
-
-    monkeypatch.setattr(
-        task_app_svc,
-        "SessionLocal",
-        sessionmaker(bind=db_session.bind, expire_on_commit=False),
-    )
-    with patch.object(task_app_svc.OpenCodeClient, "start_agent_serve") as mock_start:
-        TaskAppSvc.reassign_to_agent_async(task.id)
-
-    mock_start.assert_called_once()
-
-
-def test_reassign_async_in_webhook(client, db_session, monkeypatch):
-    """confirm_btn task_complete 回调 reassign -> 事务内改 executor + 异步下发。"""
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task1 = tasks[0]
-    db_session.flush()
-    _patch_session_locals(monkeypatch, db_session)
-    monkeypatch.setattr(
-        "app.webhook.feishu_card.get_card_context",
-        lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
-    )
-    with (
-        patch.object(TaskAppSvc, "confirm_complete") as mc,
-        patch.object(TaskAppSvc, "reassign_to_agent_async") as ma,
-    ):
-        mc.return_value = {"task_id": "x", "status": "已完成"}
-        payload = _form_submit_payload("om_tc", "confirm_btn", {f"task_{task1.id}_reassign": True})
-        resp = client.post(_WEBHOOK, json=payload)
-    assert resp.status_code == 200
-    # 方案 B：同步返回 toast + card
-    assert resp.json()["toast"]["content"] == "确认完成已提交"
-    ma.assert_called_once_with(task1.id)
 
 
 # ===== Block 4: delete_session 已在 test_task_app_svc.py 覆盖 =====

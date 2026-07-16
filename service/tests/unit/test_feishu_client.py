@@ -436,7 +436,7 @@ def test_build_deadline_reminder_card_structure():
     assert buttons[0]["behaviors"][0]["value"]["phase_id"] == "phase_1"
 
 
-# ===== build_plan_reminder_card（doc/06 §I Step6，纯提醒无按钮）=====
+# ===== build_plan_reminder_card（doc/01 S8 AC：未确认计划 10:00 提醒，纯提醒无按钮）=====
 
 
 def test_build_plan_reminder_card_structure():
@@ -447,7 +447,7 @@ def test_build_plan_reminder_card_structure():
     assert len(buttons) == 0, "计划提醒卡不应有按钮"
 
 
-# ===== build_summary_reminder_card（doc/06 §I Step7，纯提醒无按钮）=====
+# ===== build_summary_reminder_card（doc/01 S8 AC：未做日终总结 21:00 提醒，纯提醒无按钮）=====
 
 
 def test_build_summary_reminder_card_structure():
@@ -722,7 +722,7 @@ def test_build_daily_plan_card_empty_tasks():
     _assert_form_submit_button(confirm_btn, "confirm_btn")
 
 
-# ===== build_task_complete_card（doc/09 §S4A 场景4，已完成展示 + 待确认 checker + reassign）=====
+# ===== build_task_complete_card（doc/09 §S4A 场景4，已完成展示 + 待确认 checker）=====
 
 
 def test_build_task_complete_card_structure():
@@ -768,50 +768,6 @@ def test_build_task_complete_card_structure():
     # confirm_btn（form_submit）
     confirm_btn = next(el for el in form_elements if el.get("name") == "confirm_btn")
     _assert_form_submit_button(confirm_btn, "confirm_btn")
-
-
-def test_build_task_complete_card_reassign_only_for_agent():
-    """reassign checker 只对 is_agent 任务出现（doc/09 §S4A 实现注意）。"""
-    card = build_task_complete_card(
-        workspace_name="ws",
-        completed_tasks=[],
-        pending_tasks=[
-            {"id": "t1", "name": "人任务", "executor": "human", "is_agent": False},
-            {"id": "t2", "name": "智能体任务", "executor": "agent", "is_agent": True},
-        ],
-    )
-    form = _find_form(card)
-    assert form is not None
-    form_elements = form["elements"]
-
-    # 人任务：无 reassign checker
-    reassign_t1 = next((el for el in form_elements if el.get("name") == "task_t1_reassign"), None)
-    assert reassign_t1 is None, "人任务不应有 reassign checker"
-
-    # 智能体任务：有 reassign checker
-    reassign_t2 = next((el for el in form_elements if el.get("name") == "task_t2_reassign"), None)
-    assert reassign_t2 is not None, "智能体任务应有 reassign checker"
-    assert reassign_t2["tag"] == "checker"
-    assert "改交智能体重新执行" in reassign_t2["text"]["content"]
-
-
-def test_build_task_complete_card_reassign_name_association():
-    """reassign checker name 与 confirm checker 同 id（task_{id} vs task_{id}_reassign）。
-
-    doc/09 §S4A 实现注意：builder 要让两个 checker 的 name 能被 webhook 关联。
-    """
-    card = build_task_complete_card(
-        workspace_name="ws",
-        completed_tasks=[],
-        pending_tasks=[
-            {"id": "abc-123", "name": "任务", "executor": "agent", "is_agent": True},
-        ],
-    )
-    form = _find_form(card)
-    form_elements = form["elements"]
-    # task_abc-123 和 task_abc-123_reassign 同 id
-    assert any(el.get("name") == "task_abc-123" for el in form_elements)
-    assert any(el.get("name") == "task_abc-123_reassign" for el in form_elements)
 
 
 def test_build_task_complete_card_no_completed():

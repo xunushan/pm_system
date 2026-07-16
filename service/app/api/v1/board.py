@@ -33,8 +33,8 @@ def update_fields(
 ) -> ApiResponse[BoardUpdateData]:
     """H5 字段编辑（名称/描述/deadline/executor）+ 增删任务 + 阶段排序。
 
-    managed/path 不可改（激活后不能改，doc/01 S9 line 717）。
-    任务排序不支持（交给 pm-daily，doc/01 S9 line 715）。
+    managed/path 不可改（激活后不能改，doc/01 S2 AC：激活后不能修改项目空间模式）。
+    任务排序不支持（交给 pm-daily，doc/01 S3 AC：用户只能勾选/取消候选任务，不能新增）。
     """
     data = BoardAppSvc(db).update_fields(entity, entity_id, payload.fields)
     return ApiResponse(data=data)

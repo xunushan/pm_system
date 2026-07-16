@@ -200,10 +200,10 @@ class ScheduleAppSvc:
         与 confirm 的区别：
           - activate 激活**指定 phase**（衔接下一阶段），
             confirm 激活**首个未开始 phase**（首次调度）
-          - triggered_by='supervisor'（doc/04 line 310）
+          - triggered_by='supervisor'（doc/04 §3.3 POST /schedules/activate）
           - workspace 复用同专题已有 workspace（1:1）；无则建 managed=1
 
-        事务内（doc/04 约 307-312）：
+        事务内（doc/04 §3.3 /schedules/activate）：
           1. 校验 phase 存在 + 状态未开始 + 全局进行中 < 3 + 同专题无进行中
           2. UPDATE phase + state_machine + audit(forward, supervisor)
           3. 即时级联（激活级联 phase->theme->goal）

@@ -71,7 +71,8 @@ def check_start_date(
     today: date | None = None,
     feishu: FeishuClient | None = None,
 ) -> int:
-    """scheduled_start_date 到了未激活 -> 推提醒（doc/06 §I Step4）。
+    """scheduled_start_date 到了未激活 -> 推提醒。
+    doc/01 S8 AC：计划开始日期到达未激活提醒，每天 1 次。
 
     查 goals.scheduled_start_date <= today 且 status='未开始'（已暂停不巡检）。
     每项每天最多 1 次（Redis 去重）。
@@ -114,7 +115,8 @@ def check_deadline(
     today: date | None = None,
     feishu: FeishuClient | None = None,
 ) -> int:
-    """deadline 临近（前1天/当天）-> 进度提醒（doc/06 §I Step5）。
+    """deadline 临近（前1天/当天）-> 进度提醒。
+    doc/01 S8 AC：deadline 临近时提醒并跳转页面修改 deadline。
 
     查 phases.deadline 在 [today, today+1] 且 status='进行中'（已暂停不巡检）。
     """
@@ -155,7 +157,7 @@ def check_unconfirmed_plan(
     today: date | None = None,
     feishu: FeishuClient | None = None,
 ) -> int:
-    """未确认计划 10:00 -> 提醒（doc/06 §I Step6）。
+    """未确认计划 10:00 -> 提醒（doc/01 S8 AC：未确认当日计划 10:00 定时提醒）。
 
     查今日 daily_records.is_confirmed=0。每项每天最多 1 次。
     """
@@ -188,7 +190,7 @@ def check_missing_summary(
     today: date | None = None,
     feishu: FeishuClient | None = None,
 ) -> int:
-    """未做日终总结 21:00 -> 提醒（doc/06 §I Step7）。
+    """未做日终总结 21:00 -> 提醒（doc/01 S8 AC：未做日终总结 21:00 定时提醒）。
 
     查今日无 daily_records 或 is_confirmed=0。每项每天最多 1 次。
     """
@@ -221,7 +223,7 @@ def check_linking_unresponded(
     today: date | None = None,
     feishu: FeishuClient | None = None,
 ) -> int:
-    """阶段衔接 24h 未响应 -> 再推一次（doc/06 §I Step8）。
+    """阶段衔接 24h 未响应 -> 再推一次（doc/01 S8 AC：阶段衔接卡片 24 小时未响应再推送 1 次）。
 
     逻辑：
       1. 查已完成的 phases（有 activated_at，status='已完成'）

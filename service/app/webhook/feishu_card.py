@@ -291,7 +291,7 @@ async def feishu_card_callback(
         # phase_id 靠 message_id 反查 card_registry
         ctx = get_card_context(message_id)
         phase_id = (ctx or {}).get("phase_id", "")
-        # 记录暂缓：不激活，24h 后巡检再提醒（doc/06 表2 story8_暂不激活）
+        # 记录暂缓：不激活，24h 后巡检再提醒（doc/06 按钮->路由表 story8_暂不激活）
         logger.info("btn_defer: phase=%s 用户选择暂不激活，24h 后巡检再提醒", phase_id)
         # 同步返回终态卡片（方案 B）：橙色暂缓态（doc/09 §S8 状态3）
         card = ScheduleAppSvc.build_defer_done_card_from_db(db, phase_id)
@@ -433,7 +433,7 @@ async def feishu_card_callback(
             # builder 渲染初始 checked（已完成=checked），webhook 拿 form_value 后对比反转。
             # 初始状态 = DB 当前 task.status（card 从 DB 构建）。
             for k, v in form_value.items():
-                if not k.startswith("task_") or k.endswith("_reassign"):
+                if not k.startswith("task_"):
                     continue
                 task_id = k[len("task_") :]
                 target_completed = bool(v)
@@ -462,33 +462,16 @@ async def feishu_card_callback(
 
         # S4A 场景4 确认完成（doc/09 §S4A 场景4）
         if card_type == "task_complete":
-            # 从 form_value 取 checker：task_<id>=true（确认完成）+
-            # task_<id>_reassign=true（改交智能体重新执行）
-            # 互斥判定（doc/09 §S4A 实现注意）：reassign=true 不走确认完成，
-            # 而是改 executor=agent + 重新下发（铁律8 executor 可改，D26）
-            reassigned: list[str] = []
+            # 从 form_value 取 checker：task_<id>=true（确认完成）
             completed: list[str] = []
             for k, v in form_value.items():
-                if not k.startswith("task_"):
-                    continue
-                if k.endswith("_reassign"):
-                    if v:
-                        reassigned.append(k[len("task_") : -len("_reassign")])
-                elif v:
-                    task_id = k[len("task_") :]
-                    if task_id not in reassigned:
-                        completed.append(task_id)
+                if k.startswith("task_") and v:
+                    completed.append(k[len("task_") :])
             # 确认完成：即时级联（事务内 <200ms）
             results = []
             for tid in completed:
                 data = TaskAppSvc(db).confirm_complete(tid, _DEFAULT_USER_ID)
                 results.append({"task_id": tid, "action": "completed"})
-            # reassign：改 executor=agent（事务内），事务后异步下发（铁律 §3#3/#4）
-            for tid in reassigned:
-                data = TaskAppSvc(db).reassign_to_agent(tid, _DEFAULT_USER_ID)
-                results.append({"task_id": tid, "action": "reassigned"})
-                # 事务后异步：start_agent_serve（IO，BackgroundTasks）
-                background_tasks.add_task(TaskAppSvc.reassign_to_agent_async, tid)
             # 同步返回终态卡片（方案 B）：绿色确认完成已提交态（doc/09 §S4A 场景4 点确认完成后）
             workspace_id = ctx.get("workspace_id", "")
             card = TaskAppSvc.build_task_complete_done_card_from_db(db, workspace_id, results)

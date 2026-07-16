@@ -197,7 +197,7 @@ def test_create_invalid_scope_type_returns_400(client, db_session):
 
 
 def test_create_does_not_validate_theme_type(client, db_session):
-    """配置时不校验专题 type（doc/01 line 572）。"""
+    """配置时不校验专题 type（doc/01 S7 AC：配置时不校验专题类型）。"""
     resp = client.post(
         _API,
         json={

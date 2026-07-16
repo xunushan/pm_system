@@ -130,7 +130,7 @@ class FeishuClient:
         return data.get("data", {}).get("message_id")
 
     def send_file(self, chat_id: str, file_path: str) -> str | None:
-        """发送文件消息（逐个发送产出文件到飞书，doc/06 步骤6）。"""
+        """发送文件消息（逐个发送产出文件到飞书，doc/04 §3.7 验收发文件）。"""
         if not self._is_configured():
             return None
         # 先上传文件获取 file_key
@@ -448,7 +448,8 @@ def build_start_date_reminder_card(
     scheduled_start_date: str,
     user_id: str = "",
 ) -> dict:
-    """构建开始日未激活提醒卡片（schema 2.0，doc/06 §I Step4 / doc/09 §S8其他子卡）。
+    """构建开始日未激活提醒卡片（schema 2.0）。
+    doc/01 S8 AC：计划开始日期到达未激活提醒 / doc/09 §S8其他子卡。
 
     纯提醒 + 去激活按钮（form 外 behaviors callback）。
     """
@@ -494,7 +495,8 @@ def build_deadline_reminder_card(
     h5_base_url: str = "",
     user_id: str = "",
 ) -> dict:
-    """构建 deadline 临近提醒卡片（schema 2.0，doc/06 §I Step5 / doc/09 §S8其他子卡）。
+    """构建 deadline 临近提醒卡片（schema 2.0）。
+    doc/01 S8 AC：deadline 临近提醒 / doc/09 §S8其他子卡。
 
     纯提醒 + 去页面调整按钮（form 外 behaviors callback）。
     """
@@ -534,7 +536,7 @@ def build_deadline_reminder_card(
 
 
 def build_plan_reminder_card(date_str: str) -> dict:
-    """构建未确认计划提醒卡片（schema 2.0，doc/06 §I Step6，10:00 巡检）。"""
+    """构建未确认计划提醒卡片（schema 2.0，doc/01 S8 AC：未确认计划 10:00 提醒）。"""
     content = f"📋 **今日计划未确认**\n\n日期：{date_str}\n\n请尽快确认今日计划。"
     return {
         "schema": "2.0",
@@ -547,7 +549,7 @@ def build_plan_reminder_card(date_str: str) -> dict:
 
 
 def build_summary_reminder_card(date_str: str) -> dict:
-    """构建未做日终总结提醒卡片（schema 2.0，doc/06 §I Step7，21:00 巡检）。"""
+    """构建未做日终总结提醒卡片（schema 2.0，doc/01 S8 AC：未做日终总结 21:00 提醒）。"""
     content = f"📝 **今日日终总结未完成**\n\n日期：{date_str}\n\n请尽快完成日终总结。"
     return {
         "schema": "2.0",
@@ -825,8 +827,6 @@ def build_task_complete_card(
 
     已完成任务：纯展示（div + lark_md，不可操作），显示执行主体 [人]/[智能体]。
     待确认任务：checker 勾选确认完成（name=task_<id>），显示执行主体。
-    智能体任务可选"改交智能体重新执行"checker（name=task_<id>_reassign），文案带缩进箭头。
-    reassign 与 confirm 互斥（builder 只渲染两个 checker，互斥判定在 webhook/Service PR-D）。
     确认完成按钮（form_submit，name=confirm_btn）。
 
     :param workspace_name: 工作空间名称
@@ -869,20 +869,6 @@ def build_task_complete_card(
                 "text": {"tag": "plain_text", "content": f"{t['name']} {executor_tag}"},
             }
         )
-        # 智能体任务可选 reassign（doc/09 §S4A 实现注意：只对 is_agent 任务出现）
-        if t.get("is_agent"):
-            form_elements.append(
-                {
-                    "tag": "checker",
-                    "name": f"task_{t['id']}_reassign",
-                    "text": {
-                        "tag": "plain_text",
-                        "content": (
-                            "    ↑ 将此任务改交智能体重新执行（确认后 executor=智能体，重新下发）"
-                        ),
-                    },
-                }
-            )
 
     form_elements.append({"tag": "hr"})
     form_elements.append(

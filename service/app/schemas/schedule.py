@@ -48,7 +48,7 @@ class ScheduleConfirmData(BaseModel):
 
 
 class ScheduleActivateRequest(BaseModel):
-    """POST /schedules/activate 请求（Supervisor 衔接激活，doc/04 约 283-289）。"""
+    """POST /schedules/activate 请求（Supervisor 衔接激活，doc/04 §3.3）。"""
 
     phase_id: str
     deadline: date
@@ -56,7 +56,7 @@ class ScheduleActivateRequest(BaseModel):
 
 
 class ScheduleActivateData(BaseModel):
-    """POST /schedules/activate 响应（doc/04 约 295-302）。"""
+    """POST /schedules/activate 响应（doc/04 §3.3）。"""
 
     phase_id: str
     name: str

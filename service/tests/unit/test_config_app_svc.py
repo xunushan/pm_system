@@ -204,7 +204,7 @@ class TestConfigAppSvcCreate:
         assert data.type == "后置"
 
     def test_create_does_not_validate_theme_type(self, db_session):
-        """配置时不校验专题 type（doc/01 line 572）。
+        """配置时不校验专题 type（doc/01 S7 AC：配置时不校验专题类型）。
 
         即便 scope_id 指向一个智能体专题（type=dev），也能存模板。
         Service 不查 theme 表、不校验 theme.type。

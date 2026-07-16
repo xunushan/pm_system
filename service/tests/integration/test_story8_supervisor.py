@@ -1,6 +1,6 @@
 """Story8 集成测试：阶段衔接激活 + webhook + 事件端到端。
 
-验收要点（doc/01 S8, doc/06 §I）：
+验收要点（doc/01 S8）：
   - POST /schedules/activate: 激活+即时级联+审计(forward,supervisor)+workspace
   - 全局进行中 <= 3（≤3 校验）
   - 同专题已有进行中 -> 409

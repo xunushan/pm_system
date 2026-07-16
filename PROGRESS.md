@@ -45,10 +45,11 @@
 | `doc/03_系统架构文档_v2.0.md` | 双层架构 + Supervisor + H5 + 约束 8.1-8.21 |
 | `doc/04_服务API文档_v2.0.md` | REST 接口 + webhook + drafts |
 | `doc/05_Skill设计文档_v2.0.md` | 5 Skill 职责边界 |
-| `doc/06_操作流程与技术动作清单_v2.0.md` | 每 Story 操作流程 + 指令/卡片/H5/定时表 |
+| `doc/06_操作流程与技术动作清单_v2.0.md` | 卡片按钮路由清单（入口 B action_id/btn_name 对照） |
 | `doc/07_决策文档_v1.0.md` | 历轮决策 D1-D26（含推翻项） |
 | `doc/08_教训文档.md` | v2 验证教训 L1-L6 + 测试三分 + 行业标准 + 检查清单 |
-| `doc/09_卡片交互样式记录.md` | 全 Story schema 2.0 JSON + 验证记录 V1-V9 + 飞书链接 |
+| `doc/09_卡片交互样式记录.md` | UI 卡片交互样式（schema 2.0，纯 UI） |
+| `doc/13_原型验证/` | 飞书卡片 + opencode 集成验证事实（V1-V9 / D27/D28） |
 | `CLAUDE.md` | 架构铁律（11 条）+ 代码规范 + 开发流程 + 协作规范 |
 | `service/tests/e2e/TEST_PLAN.md` | e2e 测试用例 |
 | `service/app/models/__init__.py` | 代码层进度表（✅/⬜） |
@@ -69,6 +70,8 @@
 - **[P2] S3 已确认态任务行缺阶段名**：`daily_app_svc.py` `build_daily_plan_done_card` 任务行只显示 `task.name`，丢 `phase.name`，不同阶段同名任务刷新后无法区分。dt_rows 已 JOIN Phase，加 `（{phase.name}）` 即可。
 - **[观测] FeishuClient token 实例级缓存**：`refresh_*_async` 每次新建 FeishuClient 实例，token 不共享（每次多 179ms）。可改类级缓存。（方案 B 后 refresh_*_async 只用于非回调场景，影响降低）
 - **[观测] Redis 容错**：`card_registry` Redis 不可用时无 try/except，建议加（与 task_timeout 一致目前无容错）
+- **[P2] S4A 验收失败通知方式与设计不符**：`task_app_svc.py:648-658` 第 3 次验收不通过走 `send_text` 发纯文本飞书消息（无卡片、无 session_id）。doc/09 场景3 设计为推"需人工接手"卡片（含 workspace_path + session_id），feature-02 Story 4A 已对齐卡片设计。需把 `send_text` 改为推 doc/09 场景3 人工接手卡。
+- **[P2] S2 确认后卡片仍带配置页链接**：`schedule_app_svc.py:344-369` `build_schedule_done_card` 确认后态含"调整请前往配置页"链接。但确认后 managed 已锁定不可改，链接无意义。doc/09 §S2 状态3 + feature-02 Story 2 已改为"只看初始化进度无链接"。需去掉该 markdown element（h5_url 参数保留给卡片 A，确认后态不用）。
 
 ### 未实测 / 待补
 - **[未实测] S4A 真实 opencode dispatch**：e2e 测了卡片交互（btn_pass/btn_reject），但 opencode 真实执行 learning 任务时 `dispatch_task` 超时（httpcore.ReadTimeout 300s，opencode 执行卡住）。**非卡片交互问题，是 opencode 执行 learning 任务本身耗时/卡住**。需造 dev/survey 类型任务 + start_agent_serve + 等执行 + 产出回调补全。当前 S4A 验收/重试链路已通过，仅缺真实 dispatch 全程。
@@ -80,15 +83,17 @@
 
 ## 五、下一步计划与追踪
 
-### 优先级 1：opencode 真实 dispatch 补测（S4A 收尾）
+**### 优先级 1：opencode 真实 dispatch 补测（S4A 收尾）
 - [ ] 造 dev/survey 类型任务（executor=agent）+ 激活阶段
 - [ ] start_agent_serve（opencode serve :18800 全局单进程）
 - [ ] 等真实执行完成 + 产出回调 `/api/callback/opencode/output`
 - [ ] 验证 workspace_progress 落库 + 验收卡推送 + btn_pass 全程
-- [ ] 追踪：当前 dispatch_task 超时根因（opencode 执行 learning 卡住 vs 超时配置）
+- [ ] 追踪：当前 dispatch_task 超时根因（opencode 执行 learning 卡住 vs 超时配置）**
 
 ### 优先级 2：P2 缺陷修复
 - [ ] S3 任务行补阶段名（`build_daily_plan_done_card` 加 `（{phase.name}）`）
+- [ ] S4A 验收失败改推人工接手卡（`task_app_svc.py` send_text -> doc/09 场景3 卡片，含 session_id）
+- [ ] S2 确认后卡去掉配置页链接（`schedule_app_svc.build_schedule_done_card` 删 h5_url markdown element）
 - [ ] FeishuClient token 类级缓存
 - [ ] card_registry Redis 容错
 

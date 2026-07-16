@@ -151,7 +151,7 @@ def patch_task_status(
 
 @router.delete("/{task_id}", response_model=ApiResponse[TaskDeleteData])
 def delete_task(task_id: str, db: DBSession) -> ApiResponse[TaskDeleteData]:
-    """物理删除任务（H5 页面操作，doc/04 line 534）。
+    """物理删除任务（H5 页面操作，doc/04 §3.5 DELETE /tasks/{id}）。
 
     删除关联记录（daily_tasks/subtasks/workspace_progress）后物理删除 task。
     不触发完成级联（物理删除是结构调整，非完成动作）。

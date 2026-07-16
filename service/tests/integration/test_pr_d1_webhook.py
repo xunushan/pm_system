@@ -1,4 +1,4 @@
-"""PR-D1 集成测试：btn_name 路由 + form_value 4 类型解析 + card_registry 反查 + reassign 互斥。
+"""PR-D1 集成测试：btn_name 路由 + form_value 4 类型解析 + card_registry 反查。
 
 覆盖 doc/09 V7（form_value 类型）+ V8（form_submit 靠 name 路由）+ V2（message_id 路径）。
 
@@ -7,7 +7,6 @@
   - date_picker（日期字符串含时区）：S2 卡片B deadline、S8 阶段衔接 deadline
   - input（字符串）：S4A feedback（issue#20）
   - card_registry 反查：None 容错、type 分发、各类型上下文
-  - S4A场景4 reassign 互斥：reassign=true 不走确认完成
 """
 
 from datetime import date
@@ -22,7 +21,6 @@ from app.models.phase import Phase
 from app.models.subtask import Subtask
 from app.models.task import Task
 from app.services import daily_app_svc, task_app_svc
-from app.services.task_app_svc import TaskAppSvc
 from tests._factory import make_tree
 
 _WEBHOOK = "/webhook/feishu/card"
@@ -315,95 +313,3 @@ def test_card_registry_unknown_type_confirm_btn(client, db_session, monkeypatch)
     resp = client.post(_WEBHOOK, json=payload)
     assert resp.status_code == 200
     assert resp.json()["code"] == 1002
-
-
-# ===== S4A 场景4 reassign 互斥（doc/09 §S4A 实现注意）=====
-
-
-def test_reassign_mutual_exclusion(client, db_session, monkeypatch):
-    """task_<id>_reassign=true -> 不走确认完成，走 reassign（改 executor=agent + 下发）。
-
-    doc/09 §S4A 场景4 实现注意：reassign checker 勾选后，该 task 不走"确认完成"，
-    而是"改 executor=agent + 重新下发"（同一 task 不能既确认完成又重新下发）。
-    """
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task1, task2 = tasks[0], tasks[1]
-    db_session.flush()
-
-    monkeypatch.setattr(
-        "app.webhook.feishu_card.get_card_context",
-        lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
-    )
-    # mock reassign 的 opencode 调用
-    with (
-        patch.object(task_app_svc.TaskAppSvc, "confirm_complete") as mock_complete,
-        patch.object(task_app_svc.TaskAppSvc, "reassign_to_agent") as mock_reassign,
-    ):
-        mock_complete.return_value = {"task_id": task2.id, "status": "已完成"}
-        mock_reassign.return_value = {"task_id": task1.id, "executor": "agent", "reassigned": True}
-        payload = _form_submit_payload(
-            "om_tc",
-            "confirm_btn",
-            {
-                f"task_{task1.id}_reassign": True,  # reassign -> 不走确认完成
-                f"task_{task2.id}": True,  # 确认完成
-            },
-        )
-        resp = client.post(_WEBHOOK, json=payload)
-
-    assert resp.status_code == 200, resp.text
-    # 方案 B：同步返回 toast + card（确认完成已提交）
-    assert resp.json()["toast"]["content"] == "确认完成已提交"
-    # confirm_complete 只对 task2 调用（不含 task1）
-    mock_complete.assert_called_once_with(task2.id, "feishu_user")
-    # reassign 只对 task1 调用
-    mock_reassign.assert_called_once_with(task1.id, "feishu_user")
-
-
-def test_reassign_only(client, db_session, monkeypatch):
-    """只有 reassign，无确认完成。"""
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task1 = tasks[0]
-    db_session.flush()
-
-    monkeypatch.setattr(
-        "app.webhook.feishu_card.get_card_context",
-        lambda msg_id: {"type": "task_complete", "workspace_id": ws.id},
-    )
-    with (
-        patch.object(task_app_svc.TaskAppSvc, "confirm_complete") as mock_complete,
-        patch.object(task_app_svc.TaskAppSvc, "reassign_to_agent") as mock_reassign,
-    ):
-        mock_reassign.return_value = {"task_id": task1.id, "executor": "agent", "reassigned": True}
-        payload = _form_submit_payload(
-            "om_tc",
-            "confirm_btn",
-            {f"task_{task1.id}_reassign": True, f"task_{task1.id}": True},
-        )
-        resp = client.post(_WEBHOOK, json=payload)
-
-    assert resp.status_code == 200
-    # 方案 B：同步返回 toast + card（确认完成已提交）
-    assert resp.json()["toast"]["content"] == "确认完成已提交"
-    mock_complete.assert_not_called()
-
-
-def test_reassign_to_agent_changes_executor(client, db_session):
-    """reassign_to_agent -> task.executor 改为 'agent'。"""
-    from tests.integration.test_story4a_agent import _make_full_tree
-
-    goal, themes, phases, ws, tasks = _make_full_tree(db_session)
-    task = tasks[0]
-    task.executor = "human"
-    db_session.flush()
-
-    with patch.object(task_app_svc.OpenCodeClient, "start_agent_serve", return_value=18800):
-        result = TaskAppSvc(db_session).reassign_to_agent(task.id)
-
-    db_session.refresh(task)
-    assert task.executor == "agent"
-    assert result["reassigned"] is True

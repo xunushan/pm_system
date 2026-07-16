@@ -117,7 +117,7 @@ class TaskAppSvc:
     # ---- POST /tasks/{taskId}/complete (Story4B) ----
 
     def complete(self, task_id: str, user_id: str) -> TaskCompleteData:
-        """标记任务完成 + 即时级联（doc/04 3.5 行540）。
+        """标记任务完成 + 即时级联（doc/04 §3.7 POST /tasks/{id}/complete）。
 
         事务内：
           1. 校验 task 存在 + 状态机（待执行->已完成 forward）
@@ -271,7 +271,8 @@ class TaskAppSvc:
     def post_confirm(
         self, task_id: str, user_id: str, post_subtasks: list[PostSubtaskInput]
     ) -> PostConfirmData:
-        """后置确认（doc/04 3.5 行595）：INSERT 勾选的后置子任务，可全取消。
+        """后置确认（doc/04 §3.7 POST /tasks/{id}/post-confirm）：
+        INSERT 勾选的后置子任务，可全取消。
 
         事务内：
           1. 校验 task 存在 + 已完成 + executor='human'（后置只对人执行任务）
@@ -404,13 +405,13 @@ class TaskAppSvc:
     def confirm_complete(self, task_id: str, user_id: str) -> ConfirmCompleteData:
         """4A 人工确认完成。3 次重试不通过，用户手动接管后调用。
 
-        事务（doc/04 行588）：
+        事务（doc/04 §3.7 POST /tasks/{id}/confirm-complete）：
           1. UPDATE tasks SET status='已完成', completed_at=NOW()
           2. 写 status_change_log（forward, triggered_by='user'）
           3. 即时级联（cascade.cascade_status, S4B 实现完成链）
           4. COMMIT
 
-        事务后异步（doc/04 行593）：
+        事务后异步（doc/04 §3.7 confirm-complete）：
           5. 检测该工作空间是否还有待执行智能体任务
              是 -> 重启 opencode serve（不同端口）接管
              否 -> 不启动
@@ -465,52 +466,6 @@ class TaskAppSvc:
             next_agent_task=next_agent_task.id if next_agent_task else None,
         )
 
-    # ---- S4A 场景4 reassign（改交智能体重新执行，D26）----
-
-    def reassign_to_agent(self, task_id: str, user_id: str = "feishu_user") -> dict:
-        """改交智能体重新执行（D26）：改 executor=agent + COMMIT（仅事务）。
-
-        doc/09 §S4A 场景4 实现注意：reassign checker 勾选后，该 task 不走确认完成，
-        而是改 executor=agent + 重新下发（铁律8 executor 可改，D26）。
-
-        事务内：UPDATE task.executor='agent' + COMMIT（<200ms）。
-        事务后异步：start_agent_serve 重新下发（IO，由路由层 BackgroundTasks 调
-        reassign_to_agent_async，与 confirm_complete._restart_opencode 同模式，铁律 §3#3/#4）。
-        """
-        task = self.task_repo.get(task_id)
-        if task is None:
-            raise NotFoundError(f"任务不存在: {task_id}")
-
-        task.executor = "agent"
-        self.db.commit()
-
-        return {"task_id": task_id, "executor": "agent", "reassigned": True}
-
-    @staticmethod
-    def reassign_to_agent_async(task_id: str) -> None:
-        """事务后异步：改交智能体重新下发（独立 session，BackgroundTasks 调用）。
-
-        与 confirm_complete._restart_opencode 同模式，IO 操作事务后异步（铁律 §3#3/#4）。
-        """
-        db = SessionLocal()
-        try:
-            svc = TaskAppSvc(db)
-            task = svc.task_repo.get(task_id)
-            if task is None:
-                return
-            workspace_id = svc._get_workspace_id_for_task(task)
-            if workspace_id:
-                task_dict = {
-                    "task_id": task.id,
-                    "name": task.name,
-                    "phase_id": task.phase_id,
-                }
-                svc.opencode.start_agent_serve(workspace_id, task_dict)
-        except Exception:
-            logger.exception("reassign_to_agent_async 失败: task=%s", task_id)
-        finally:
-            db.close()
-
     # ---- POST /tasks/{taskId}/output/confirm (Story4A) ----
 
     def output_confirm(
@@ -518,7 +473,7 @@ class TaskAppSvc:
     ) -> OutputConfirmData:
         """验收通过智能体产出。即时级联。
 
-        事务（doc/04 行646）：
+        事务（doc/04 §3.7 POST /tasks/{id}/output/confirm）：
           1. UPDATE tasks SET status='已完成', completed_at=NOW()
           2. UPDATE subtasks（相关前置）SET status='已完成'
           3. 写 status_change_log
@@ -582,7 +537,7 @@ class TaskAppSvc:
           - retry 路径：dispatch_task + 重设 Redis 超时
           - manual_intervention 路径：opencode delete_session + 飞书通知
 
-        逻辑（doc/04 行654, doc/06 步骤8）：
+        逻辑（doc/04 §3.7 POST /tasks/{id}/output/reject）：
           - retry_count < 3：retry_count+=1 -> action='retry'
           - retry_count >= 3：不改状态 -> action='manual_intervention'
 
@@ -668,7 +623,7 @@ class TaskAppSvc:
     ) -> RecordOutputData:
         """记录 OpenCode 产出回调。
 
-        事务（doc/04 §3.12, doc/06 步骤5）：
+        事务（doc/04 §3.13 POST /api/callback/opencode/output）：
           1. INSERT workspace_progress（每个产出文件一条记录）
           2. COMMIT
           3. 事务后异步：DEL Redis 超时 + 发验收卡片 + 发送产出文件到飞书
@@ -863,7 +818,7 @@ class TaskAppSvc:
     def _trigger_output_async(self, task_id: str, workspace_id: str, outputs: list[dict]) -> None:
         """事务后异步：DEL Redis 超时 + 发验收卡片 + 发送产出文件到飞书。
 
-        doc/06 步骤5-6：
+        doc/04 §3.7 验收发文件 + §3.13 产出回调：
           - DEL task_timeout:{task_id}
           - 发验收卡片（模板填充，无 LLM）：任务名 + 产出文件名列表 + 验收通过/需要修改按钮
           - 逐个发送产出文件到飞书
@@ -1052,17 +1007,11 @@ class TaskAppSvc:
         return build_post_confirm_card(task_name, task_id, post_subtasks, select_all)
 
     @staticmethod
-    def build_task_complete_done_card(
-        workspace_name: str, task_list: str, has_reassign: bool
-    ) -> dict:
+    def build_task_complete_done_card(workspace_name: str, task_list: str) -> dict:
         """构建确认完成已提交终态卡片（纯函数，doc/09 §S4A 场景4）。
 
-        绿色标题 + "✅ 确认完成已提交" + 完成任务列表 + reassign 提示。
+        绿色标题 + "✅ 确认完成已提交" + 完成任务列表。
         """
-        reassign_note = ""
-        if has_reassign:
-            reassign_note = "\n\n已重新下发改交智能体的任务。"
-
         elements = [
             {
                 "tag": "markdown",
@@ -1074,7 +1023,7 @@ class TaskAppSvc:
             },
             {"tag": "div", "text": {"tag": "lark_md", "content": task_list}},
             {"tag": "hr"},
-            {"tag": "markdown", "content": f"系统已记录。{reassign_note}"},
+            {"tag": "markdown", "content": "系统已记录。"},
         ]
         return build_done_card("确认完成已提交", "green", elements)
 
@@ -1084,22 +1033,19 @@ class TaskAppSvc:
     ) -> dict:
         """查询 DB + 构建确认完成已提交终态卡片（供 webhook 同步调用）。
 
-        :param results: [{"task_id": "...", "action": "completed"/"reassigned"}, ...]
+        :param results: [{"task_id": "...", "action": "completed"}, ...]
         """
         ws = db.get(Workspace, workspace_id)
         workspace_name = ws.path if ws else workspace_id
         completed_lines = []
-        has_reassign = False
         for r in results:
             task = db.get(Task, r["task_id"])
             task_name = task.name if task else r["task_id"]
             executor = task.executor if task else "?"
             tag = {"human": "[人]", "agent": "[智能体]"}.get(executor, f"[{executor}]")
-            if r["action"] == "reassigned":
-                has_reassign = True
             completed_lines.append(f"· {task_name} {tag} - 已完成")
         task_list = "\n".join(completed_lines) or "· （无）"
-        return TaskAppSvc.build_task_complete_done_card(workspace_name, task_list, has_reassign)
+        return TaskAppSvc.build_task_complete_done_card(workspace_name, task_list)
 
     # ---- 事务后异步 update_card 刷新终态（doc/09 §通用规则）----
 
@@ -1178,7 +1124,7 @@ class TaskAppSvc:
 
         §S4A 场景4 点确认完成后：绿色，"✅ 确认完成已提交" + 完成任务列表。
 
-        :param results: [{"task_id": "...", "action": "completed"/"reassigned"}, ...]
+        :param results: [{"task_id": "...", "action": "completed"}, ...]
 
         铁律 §3#3/#4：HTTP 事务后异步，满足飞书 3 秒回调。
         保留给非回调场景（定时任务、事件触发）；webhook 回调走同步返回（方案 B）。

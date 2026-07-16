@@ -1,7 +1,7 @@
 """BoardAppSvc：H5 看板编辑（Story9，入口 C）。
 
-doc/03 line 262「BoardAppSvc 处理 H5 编辑：校验状态机 + 回退 reason -> 落库 +
-status_change_log -> 即时级联」。
+doc/03 §6（BoardAppSvc 处理 H5 编辑：校验状态机 + 回退 reason -> 落库 +
+status_change_log -> 即时级联）。
 
 方法：
   - update_fields：字段编辑（名称/描述/deadline/executor）+ 增删任务（new_tasks）+ 阶段排序
@@ -41,7 +41,7 @@ from app.schemas.board import (
     TaskDeleteData,
 )
 
-# 各 entity 允许编辑的字段（managed/path 不可改，doc/01 S9 line 717）
+# 各 entity 允许编辑的字段（managed/path 不可改，doc/01 S2 AC：激活后不能修改项目空间模式）
 _EDITABLE_FIELDS: dict[str, set[str]] = {
     "goal": {"name", "description"},
     "theme": {"name", "description"},
@@ -216,7 +216,7 @@ class BoardAppSvc:
     ) -> BoardStatusData:
         """H5 状态变更（doc/04 §3.12 POST /board/{entity}/{id}/status）。
 
-        事务内（doc/04 line 877）：
+        事务内（doc/04 §3.12 POST /board/{entity}/{id}/status）：
           1. 校验状态机（from->to 是否允许）
           2. 校验 reason（revert/pause 必填 1005；resume 不填）
           3. UPDATE status + status_changed_at（+ completed_at/paused_at）
@@ -303,7 +303,7 @@ class BoardAppSvc:
     # ---- DELETE /tasks/{taskId} ----
 
     def delete_task(self, task_id: str) -> TaskDeleteData:
-        """物理删除任务（doc/04 line 534，v2.0 新增）。
+        """物理删除任务（doc/04 §3.5 DELETE /tasks/{id}，v2.0 新增）。
 
         事务内：
           1. 校验 task 存在

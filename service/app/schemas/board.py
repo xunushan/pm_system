@@ -18,8 +18,8 @@ class BoardUpdateRequest(BaseModel):
       phase: name, description, deadline, new_tasks（新增任务 [{name, description?, executor?}]）
       task:  name, description, executor
 
-    managed/path 不可改（激活后在 Story2 设置，doc/01 S9 line 717）。
-    任务排序不支持（交给 pm-daily，doc/01 S9 line 715）。
+    managed/path 不可改（激活后在 Story2 设置，doc/01 S2 AC：激活后不能修改项目空间模式）。
+    任务排序不支持（交给 pm-daily，doc/01 S3 AC：用户只能勾选/取消候选任务，不能新增）。
     """
 
     fields: dict[str, Any] = Field(default_factory=dict)

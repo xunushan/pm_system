@@ -26,14 +26,15 @@
 | doc/03 | 系统架构（分层 + 组件 + 集成约束） | doc/03_系统架构文档_v2.0.md |
 | doc/04 | 服务 API（REST + webhook + drafts） | doc/04_服务API文档_v2.0.md |
 | doc/05 | Skill 设计（5 Skill 职责边界） | doc/05_Skill设计文档_v2.0.md |
-| doc/06 | 操作流程与技术动作清单（指导子 agent） | doc/06_操作流程与技术动作清单_v2.0.md |
+| doc/06 | 卡片按钮路由清单（入口 B action_id/btn_name 对照） | doc/06_操作流程与技术动作清单_v2.0.md |
 | doc/07 | 关键决策（ADR：DECISION + FACT） | doc/07_决策文档_v1.0.md |
 | doc/08 | 教训（v2 验证 L1-L6） | doc/08_教训文档.md |
 | doc/09 | UI 卡片交互样式（纯 UI，schema 2.0） | doc/09_卡片交互样式记录.md |
 | doc/10 | 文档治理范式 | doc/10_文档治理范式.md |
 | doc/11 | 任务管理方案 | doc/11_任务管理方案.md |
+| doc/13 | 原型验证（飞书卡片 + opencode 集成验证事实） | doc/13_原型验证/ |
 
-**实现任何功能前，按本索引读对应文档章节**（不读全文档）。Story 与文档对照见 doc/06 或 docs/process/story-map.md。
+**实现任何功能前，按本索引读对应文档章节**（不读全文档）。Story 与文档对照见 docs/process/story-map.md。
 
 ## 三、铁律（行为准则，违反即返工）
 
@@ -52,7 +53,7 @@
 > 流程详情见引用文件，本节只放指针 + skill 触发。
 
 ### Story 纵向切片流程
-按依赖顺序逐 Story 实现（model -> migration -> repo -> service -> api -> test），**测试全绿才进下一个**。每 Story 步骤见 docs/process/dev-flow.md 或 doc/06。
+按依赖顺序逐 Story 实现（model -> migration -> repo -> service -> api -> test），**测试全绿才进下一个**。每 Story 步骤见 docs/process/dev-flow.md。
 
 ### skill 触发指针
 - **任务拆分**：读 doc/ 设计文档 -> 调 `spec-to-tasks` skill（vertical slice + quiz user + 发布 issue）
@@ -116,6 +117,12 @@
 - 阶段：未开始/进行中/已完成/已暂停；进行中↔已暂停、已完成->进行中(revert,reason必填)
 - 任务：待执行/已完成/已暂停；待执行↔已暂停、已完成->待执行(revert,reason必填)
 - 暂停/回退必填 reason，恢复不填 reason
+
+### 文档引用规范（代码注释 / 文档交叉引用）
+- **禁止用行号引用**（`doc/0X line 572`、`doc/0X 行654`、`doc/0X:NNN`）。文档增删一行即错位，行号是位置快照不是身份锚。
+- **用结构锚 + 内容提示**：`doc/0X S<N>`（Story 号）或 `doc/0X §<N.N>`（章节号），后接 `（一句内容）`。内容提示是 grep 锚，结构漂移时也能靠内容找回。
+- 形态：`doc/0X S<N>｜§<N.N>（一句内容）`。例：`doc/01 S2 AC：激活后不能修改项目空间模式` / `doc/04 §3.7 POST /tasks/{id}/complete`。
+- 错误码、章节号本身（`doc/04 1004`、`doc/02 2.16`）是稳定的，保留。
 
 ### 门禁策略
 - **CI 硬门禁**：`Service (lint+test+migrate)` 和 `H5 (build)` 必须全绿才能合并。
